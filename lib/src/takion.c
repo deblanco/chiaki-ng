@@ -190,6 +190,24 @@ static void takion_handle_packet_av(ChiakiTakion *takion, uint8_t base_type, uin
 static ChiakiErrorCode takion_read_extra_sock_messages(ChiakiTakion *takion);
 
 /**
+ * On Apple platforms, tells the system this is responsive real-time audio/video (like screen sharing).
+ * It marks outgoing packets for Wi-Fi WMM video priority (and DSCP where the network honours it): our
+ * acks, feedback and controller input. Best effort: nothing changes if the system refuses.
+ */
+static void takion_mark_realtime(ChiakiTakion *takion)
+{
+#if defined(__APPLE__) && defined(SO_NET_SERVICE_TYPE) && defined(NET_SERVICE_TYPE_RV)
+	int service = NET_SERVICE_TYPE_RV;
+	if(setsockopt(takion->sock, SOL_SOCKET, SO_NET_SERVICE_TYPE, &service, sizeof(service)) == 0)
+		CHIAKI_LOGI(takion->log, "Takion marked as responsive audio/video (NET_SERVICE_TYPE_RV)");
+	else
+		CHIAKI_LOGW(takion->log, "Takion couldn't set SO_NET_SERVICE_TYPE: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
+#else
+	(void)takion;
+#endif
+}
+
+/**
  * Sets the socket's receive buffer. The window we advertise (a_rwnd, 100 KB) is less than one large
  * keyframe at high bitrates, so a short stall of the receive thread (or of the Wi-Fi link, which then
  * delivers a burst) overflows a buffer of that size and drops packets. Ask for 4 MB, halving down to
@@ -283,6 +301,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 			CHIAKI_LOGE(takion->log, "Takion had problem reading extra messages from socket using PSN Connection with error: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
 			goto error_sock;
 		}
+		takion_mark_realtime(takion);
 		int r = takion_set_rcvbuf(takion);
 		if(r < 0)
 		{
@@ -370,6 +389,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 			ret = CHIAKI_ERR_NETWORK;
 			goto error_pipe;
 		}
+		takion_mark_realtime(takion);
 		int r = takion_set_rcvbuf(takion);
 		if(r < 0)
 		{

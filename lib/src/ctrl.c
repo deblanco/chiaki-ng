@@ -25,6 +25,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #endif
 
 #define SESSION_OSTYPE "Win10.0.0"
@@ -378,6 +379,18 @@ static ChiakiErrorCode ctrl_connect_tcp(ChiakiCtrl *ctrl)
 		ctrl_failed(ctrl, CHIAKI_QUIT_REASON_CTRL_UNKNOWN);
 		return err;
 	}
+
+	// Control messages are small and answered at once (heartbeats, requests): send them without
+	// Nagle's delay.
+	const int nodelay = 1;
+	if(setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const CHIAKI_SOCKET_BUF_TYPE)&nodelay, sizeof(nodelay)) != 0)
+		CHIAKI_LOGW(session->log, "Ctrl couldn't set TCP_NODELAY: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
+#if defined(__APPLE__) && defined(SO_NET_SERVICE_TYPE) && defined(NET_SERVICE_TYPE_RV)
+	// Same Wi-Fi priority as the stream (see takion_mark_realtime).
+	const int service = NET_SERVICE_TYPE_RV;
+	if(setsockopt(sock, SOL_SOCKET, SO_NET_SERVICE_TYPE, &service, sizeof(service)) != 0)
+		CHIAKI_LOGW(session->log, "Ctrl couldn't set SO_NET_SERVICE_TYPE: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
+#endif
 
 	chiaki_mutex_unlock(&ctrl->notif_mutex);
 	err = chiaki_stop_pipe_connect(&ctrl->stop_pipe, sock, sa, addr->ai_addrlen, 5000);
