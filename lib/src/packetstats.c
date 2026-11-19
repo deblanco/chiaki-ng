@@ -68,8 +68,10 @@ CHIAKI_EXPORT void chiaki_packet_stats_get(ChiakiPacketStats *stats, bool reset,
 	//		(unsigned long long)stats->gen_lost);
 
 	// seq
-	uint64_t seq_diff = stats->seq_max - stats->seq_min; // overflow on purpose if max < min
-	uint64_t seq_lost = stats->seq_received > seq_diff ? seq_diff : seq_diff - stats->seq_received;
+	// Sequence numbers are 16 bit and wrap: take the difference modulo 2^16, not as a (negative) int.
+	uint64_t seq_diff = (ChiakiSeqNum16)(stats->seq_max - stats->seq_min);
+	// More received than the window spans (duplicates, reordered packets from before it): nothing lost.
+	uint64_t seq_lost = stats->seq_received >= seq_diff ? 0 : seq_diff - stats->seq_received;
 	*received += stats->seq_received;
 	*lost += seq_lost;
 
