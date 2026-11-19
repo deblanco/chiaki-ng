@@ -826,6 +826,7 @@ static ChiakiErrorCode session_thread_request_session(ChiakiSession *session, Ch
 				continue;
 			}
 
+			chiaki_tcp_socket_tune(session_sock, session->log, "Session request");
 			ChiakiErrorCode err = chiaki_socket_set_nonblock(session_sock, true);
 			if(err != CHIAKI_ERR_SUCCESS)
 			{

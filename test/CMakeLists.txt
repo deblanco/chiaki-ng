@@ -16,6 +16,7 @@ set(CHIAKI_UNIT_SOURCES
 				takion.c
 				seqnum.c
 				packetstats.c
+				sock.c
 				keystate.c
 				feedback.c
 				reorderqueue.c

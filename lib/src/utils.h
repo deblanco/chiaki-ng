@@ -24,6 +24,33 @@
 
 #include <stdint.h>
 #include <limits.h>
+#ifndef _WIN32
+#include <netinet/tcp.h>
+#include <errno.h>
+#include <string.h>
+#endif
+
+/**
+ * Settings for the session request and ctrl TCP connections: their messages are small and answered at
+ * once, so no Nagle delay; on Apple platforms the same Wi-Fi priority as the stream (see takion.c), and no
+ * SIGPIPE (a write after the console reset the connection would otherwise kill a process that doesn't
+ * ignore the signal). Best effort: a refusal is logged and changes nothing.
+ */
+static inline void chiaki_tcp_socket_tune(chiaki_socket_t sock, ChiakiLog *log, const char *name)
+{
+	const int on = 1;
+	if(setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const CHIAKI_SOCKET_BUF_TYPE)&on, sizeof(on)) != 0)
+		CHIAKI_LOGW(log, "%s couldn't set TCP_NODELAY: " CHIAKI_SOCKET_ERROR_FMT, name, CHIAKI_SOCKET_ERROR_VALUE);
+#ifdef __APPLE__
+	if(setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on)) != 0)
+		CHIAKI_LOGW(log, "%s couldn't set SO_NOSIGPIPE: " CHIAKI_SOCKET_ERROR_FMT, name, CHIAKI_SOCKET_ERROR_VALUE);
+#if defined(SO_NET_SERVICE_TYPE) && defined(NET_SERVICE_TYPE_RV)
+	const int service = NET_SERVICE_TYPE_RV;
+	if(setsockopt(sock, SOL_SOCKET, SO_NET_SERVICE_TYPE, &service, sizeof(service)) != 0)
+		CHIAKI_LOGW(log, "%s couldn't set SO_NET_SERVICE_TYPE: " CHIAKI_SOCKET_ERROR_FMT, name, CHIAKI_SOCKET_ERROR_VALUE);
+#endif
+#endif
+}
 
 static inline ChiakiErrorCode set_port(struct sockaddr *sa, uint16_t port)
 {

@@ -25,7 +25,6 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
 #endif
 
 #define SESSION_OSTYPE "Win10.0.0"
@@ -33,6 +32,10 @@
 #define SESSION_CTRL_PORT 9295
 
 #define CTRL_EXPECT_TIMEOUT 5000
+// The console can reset the ctrl connection while it's still getting ready: reconnect and resend this many
+// times, this far apart, before failing the session.
+#define CTRL_REQUEST_RESET_RETRIES 3
+#define CTRL_REQUEST_RESET_DELAY_MS 35
 
 // How long receiving over PSN may keep failing, with no packet read cleanly in between,
 // before the ctrl channel is given up. A single bad packet must not end it: without ctrl
@@ -380,17 +383,7 @@ static ChiakiErrorCode ctrl_connect_tcp(ChiakiCtrl *ctrl)
 		return err;
 	}
 
-	// Control messages are small and answered at once (heartbeats, requests): send them without
-	// Nagle's delay.
-	const int nodelay = 1;
-	if(setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const CHIAKI_SOCKET_BUF_TYPE)&nodelay, sizeof(nodelay)) != 0)
-		CHIAKI_LOGW(session->log, "Ctrl couldn't set TCP_NODELAY: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
-#if defined(__APPLE__) && defined(SO_NET_SERVICE_TYPE) && defined(NET_SERVICE_TYPE_RV)
-	// Same Wi-Fi priority as the stream (see takion_mark_realtime).
-	const int service = NET_SERVICE_TYPE_RV;
-	if(setsockopt(sock, SOL_SOCKET, SO_NET_SERVICE_TYPE, &service, sizeof(service)) != 0)
-		CHIAKI_LOGW(session->log, "Ctrl couldn't set SO_NET_SERVICE_TYPE: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
-#endif
+	chiaki_tcp_socket_tune(sock, session->log, "Ctrl");
 
 	chiaki_mutex_unlock(&ctrl->notif_mutex);
 	err = chiaki_stop_pipe_connect(&ctrl->stop_pipe, sock, sa, addr->ai_addrlen, 5000);
@@ -1388,6 +1381,7 @@ static ChiakiErrorCode ctrl_connect(ChiakiCtrl *ctrl)
 	}
 
 	bool ctrl_request_retry = false;
+	int ctrl_request_resets = 0;
 	char buf[512];
 	size_t header_size;
 	size_t received_size;
@@ -1403,11 +1397,29 @@ static ChiakiErrorCode ctrl_connect(ChiakiCtrl *ctrl)
 			int sent = send(ctrl->sock, (CHIAKI_SOCKET_BUF_TYPE)send_buf, (size_t)request_len, 0);
 			if(sent < 0)
 			{
-				CHIAKI_LOGE(session->log, "Failed to send ctrl request");
-				goto error;
+				CHIAKI_LOGW(session->log, "Failed to send ctrl request: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
+				err = CHIAKI_ERR_NETWORK;
 			}
+			else
+				err = chiaki_recv_http_header(ctrl->sock, buf, sizeof(buf), &header_size, &received_size, &ctrl->stop_pipe, CTRL_EXPECT_TIMEOUT);
+		}
 
-			err = chiaki_recv_http_header(ctrl->sock, buf, sizeof(buf), &header_size, &received_size, &ctrl->stop_pipe, CTRL_EXPECT_TIMEOUT);
+		if(!session->rudp && err == CHIAKI_ERR_NETWORK && ctrl_request_resets < CTRL_REQUEST_RESET_RETRIES)
+		{
+			ctrl_request_resets++;
+			CHIAKI_LOGI(session->log, "Ctrl connection reset before the request was answered, retry %d/%d ...",
+				ctrl_request_resets, CTRL_REQUEST_RESET_RETRIES);
+			memset(buf, 0, sizeof(buf));
+			ctrl_disconnect_tcp(ctrl);
+			if(chiaki_stop_pipe_sleep(&ctrl->stop_pipe, CTRL_REQUEST_RESET_DELAY_MS) == CHIAKI_ERR_CANCELED)
+			{
+				err = CHIAKI_ERR_CANCELED;
+				break;
+			}
+			err = ctrl_connect_tcp(ctrl);
+			if(err != CHIAKI_ERR_SUCCESS)
+				goto error;
+			continue;
 		}
 
 		if(err == CHIAKI_ERR_TIMEOUT && !ctrl_request_retry)
