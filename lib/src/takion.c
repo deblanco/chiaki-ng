@@ -1502,9 +1502,10 @@ static void takion_handle_packet_message_data(ChiakiTakion *takion, uint8_t *pac
 
 static void takion_handle_packet_message_data_ack(ChiakiTakion *takion, uint8_t flags, uint8_t *buf, size_t buf_size)
 {
-	if(buf_size != 0xc)
+	// 12 bytes of header, then 4 per gap ack block (checked below): an ack with gap blocks is longer.
+	if(buf_size < 0xc)
 	{
-		CHIAKI_LOGE(takion->log, "Takion received data ack with size %zx != %#x", buf_size, 0xc);
+		CHIAKI_LOGE(takion->log, "Takion received data ack with size %zx < %#x", buf_size, 0xc);
 		return;
 	}
 
