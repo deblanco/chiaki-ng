@@ -74,13 +74,24 @@ typedef struct chiaki_regist_event_t
 	ChiakiRegisteredHost *registered_host;
 
 	/**
-	 * Why a CHIAKI_REGIST_EVENT_TYPE_FINISHED_FAILED registration failed:
+	 * Why a CHIAKI_REGIST_EVENT_TYPE_FINISHED_FAILED registration failed; what it means depends on console_answered.
+	 * Before the console answered:
 	 * CHIAKI_ERR_TIMEOUT: the console didn't answer in time;
-	 * CHIAKI_ERR_CONNECTION_REFUSED: the console refused it (its Link Device (PS5) or Add Device (PS4) screen isn't open);
+	 * CHIAKI_ERR_CONNECTION_REFUSED: the console refused the search (its Link Device (PS5) or Add Device (PS4) screen isn't open);
+	 * CHIAKI_ERR_NETWORK, CHIAKI_ERR_HOST_DOWN, CHIAKI_ERR_HOST_UNREACH, CHIAKI_ERR_PARSE_ADDR: the console couldn't be reached;
+	 * anything else: the request couldn't be made.
+	 * After the console answered:
 	 * CHIAKI_ERR_HTTP_NONOK: the console rejected the request, see http_code and application_reason;
-	 * CHIAKI_ERR_NETWORK and other network errors: the console couldn't be reached.
+	 * CHIAKI_ERR_INVALID_RESPONSE, CHIAKI_ERR_INVALID_DATA, CHIAKI_ERR_BUF_TOO_SMALL: its reply couldn't be used;
+	 * anything else (a timeout, a refused or failed request connection, a dropped connection): the console stopped
+	 * answering, e.g. its screen was closed or the network dropped.
 	 */
 	ChiakiErrorCode error;
+	/**
+	 * Whether the console had answered (the search for a regular registration, the RUDP handshake for a PSN one)
+	 * when the registration failed.
+	 */
+	bool console_answered;
 	/**
 	 * The console's HTTP status when it rejected the request, else 0.
 	 */

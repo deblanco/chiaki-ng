@@ -6,8 +6,15 @@
 #include <chiaki/regist.h>
 #include <chiaki/session.h>
 
+#include "test_log.h"
+
 #include <string.h>
 #include <stdlib.h>
+
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <unistd.h>
+#endif
 
 static const uint8_t ambassador[CHIAKI_RPCRYPT_KEY_SIZE] = { 0x13, 0x37, 0xde, 0xad, 0xbe, 0xef, 0xc0, 0xff, 0xee, 0x42, 0x63, 0x68, 0x69, 0x61, 0x6b, 0x69 };
 static const uint32_t pin = 13374201;
@@ -94,6 +101,75 @@ static MunitResult test_response_application_reason(const MunitParameter params[
 	return MUNIT_OK;
 }
 
+static void record_event(ChiakiRegistEvent *event, void *user)
+{
+	*(ChiakiRegistEvent *)user = *event;
+	((ChiakiRegistEvent *)user)->registered_host = NULL;
+}
+
+static ChiakiRegistInfo loopback_regist_info(void)
+{
+	ChiakiRegistInfo info = { 0 };
+	info.target = CHIAKI_TARGET_PS5_1;
+	info.host = "127.0.0.1";
+	info.pin = pin;
+	return info;
+}
+
+static MunitResult test_failure_before_the_console_answered(const MunitParameter params[], void *user)
+{
+	// Nothing listens on loopback: the search is refused, as by a console whose Pair Device screen is closed.
+	ChiakiRegistInfo info = loopback_regist_info();
+	ChiakiRegistEvent event = { 0 };
+	ChiakiRegist regist;
+	munit_assert_int(chiaki_regist_start(&regist, get_test_log(), &info, record_event, &event), ==, CHIAKI_ERR_SUCCESS);
+	chiaki_regist_fini(&regist); // joins: the event is in
+	munit_assert_int(event.type, ==, CHIAKI_REGIST_EVENT_TYPE_FINISHED_FAILED);
+	munit_assert_int(event.error, ==, CHIAKI_ERR_CONNECTION_REFUSED);
+	munit_assert_false(event.console_answered);
+	munit_assert_int(event.http_code, ==, 0);
+	return MUNIT_OK;
+}
+
+static MunitResult test_failure_after_the_console_answered(const MunitParameter params[], void *user)
+{
+	// A stand-in console answers the search, then refuses the request connection (nothing listens on TCP).
+	chiaki_socket_t console = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	munit_assert_false(CHIAKI_SOCKET_IS_INVALID(console));
+	struct sockaddr_in addr = { 0 };
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(9295);
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	if(bind(console, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+	{
+		CHIAKI_SOCKET_CLOSE(console);
+		return MUNIT_SKIP; // the registration port is taken on this machine
+	}
+	struct timeval timeout = { 5, 0 };
+	setsockopt(console, SOL_SOCKET, SO_RCVTIMEO, (const void *)&timeout, sizeof(timeout));
+
+	ChiakiRegistInfo info = loopback_regist_info();
+	ChiakiRegistEvent event = { 0 };
+	ChiakiRegist regist;
+	munit_assert_int(chiaki_regist_start(&regist, get_test_log(), &info, record_event, &event), ==, CHIAKI_ERR_SUCCESS);
+	char search[8] = { 0 };
+	struct sockaddr_storage from;
+	socklen_t from_size = sizeof(from);
+	CHIAKI_SSIZET_TYPE n = recvfrom(console, search, sizeof(search) - 1, 0, (struct sockaddr *)&from, &from_size);
+	munit_assert_string_equal(n > 0 ? search : "", "SRC3");
+	munit_assert_int((int)sendto(console, "RES3", 5, 0, (struct sockaddr *)&from, from_size), ==, 5);
+	chiaki_regist_fini(&regist);
+	CHIAKI_SOCKET_CLOSE(console);
+
+	munit_assert_int(event.type, ==, CHIAKI_REGIST_EVENT_TYPE_FINISHED_FAILED);
+	// CONNECTION_REFUSED, or UNKNOWN on macOS, where a failed non-blocking connect hides its cause from getpeername
+	munit_assert_int(event.error, !=, CHIAKI_ERR_SUCCESS);
+	munit_assert_int(event.error, !=, CHIAKI_ERR_HTTP_NONOK);
+	munit_assert_true(event.console_answered);
+	munit_assert_int(event.http_code, ==, 0);
+	return MUNIT_OK;
+}
+
 MunitTest tests_regist[] = {
 	{
 		"/aeropause_ps4_pre10",
@@ -122,6 +198,22 @@ MunitTest tests_regist[] = {
 	{
 		"/response_application_reason",
 		test_response_application_reason,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL
+	},
+	{
+		"/failure_before_the_console_answered",
+		test_failure_before_the_console_answered,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL
+	},
+	{
+		"/failure_after_the_console_answered",
+		test_failure_after_the_console_answered,
 		NULL,
 		NULL,
 		MUNIT_TEST_OPTION_NONE,

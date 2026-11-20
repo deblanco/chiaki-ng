@@ -236,6 +236,7 @@ static void *regist_thread_func(void *user)
 	bool canceled = false;
 	bool success = false;
 	bool psn = false;
+	bool console_answered = false;
 	int http_code = 0;
 	uint32_t application_reason = 0;
 	// if holepunch info is filled out, this is a psn regist
@@ -289,6 +290,7 @@ static void *regist_thread_func(void *user)
 			CHIAKI_LOGE(regist->log, "REGIST - Failed to init rudp");
 			goto fail;
 		}
+		console_answered = true;
 		size_t init_response_size = message.data_size - 8;
 		uint8_t init_response[init_response_size];
 		memcpy(init_response, message.data + 8, init_response_size);
@@ -332,6 +334,7 @@ static void *regist_thread_func(void *user)
 				CHIAKI_LOGE(regist->log, "Regist search failed");
 			goto fail_addrinfos;
 		}
+		console_answered = true;
 
 		err = chiaki_stop_pipe_sleep(&regist->stop_pipe, SEARCH_REQUEST_SLEEP_MS); // PS4 doesn't accept requests immediately
 		if(err != CHIAKI_ERR_TIMEOUT)
@@ -453,6 +456,7 @@ fail:
 		ChiakiRegistEvent event = { 0 };
 		event.type = CHIAKI_REGIST_EVENT_TYPE_FINISHED_FAILED;
 		event.error = err != CHIAKI_ERR_SUCCESS ? err : CHIAKI_ERR_UNKNOWN;
+		event.console_answered = console_answered;
 		event.http_code = http_code;
 		event.application_reason = application_reason;
 		regist->cb(&event, regist->cb_user);
