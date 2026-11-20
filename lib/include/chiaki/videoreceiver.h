@@ -28,10 +28,10 @@ typedef struct chiaki_video_receiver_t
 	int32_t frame_index_cur; // frame that is currently being filled
 	int32_t frame_index_prev; // last frame that has been at least partially decoded
 	int32_t frame_index_prev_complete; // last frame that has been completely decoded
+	int32_t frame_index_prev_delivered; // last frame handed to the video callback, < 0 if none yet
 	ChiakiFrameProcessor frame_processor;
 	ChiakiPacketStats *packet_stats;
 
-	int32_t frames_lost;
 	int32_t frames_lost_total;
 	int32_t reference_frames[16];
 	ChiakiBitstream bitstream;
@@ -57,6 +57,14 @@ CHIAKI_EXPORT void chiaki_video_receiver_av_packet(ChiakiVideoReceiver *video_re
 CHIAKI_EXPORT void chiaki_video_receiver_set_waiting_for_idr(ChiakiVideoReceiver *video_receiver, bool waiting_for_idr);
 CHIAKI_EXPORT bool chiaki_video_receiver_get_waiting_for_idr(ChiakiVideoReceiver *video_receiver);
 CHIAKI_EXPORT int32_t chiaki_video_receiver_get_frames_lost_total(ChiakiVideoReceiver *video_receiver);
+
+/**
+ * Frames that weren't handed over between two that were (by their 16-bit frame index): whether they never
+ * arrived, failed FEC, lacked a reference or were skipped while waiting for an IDR, each counts once.
+ *
+ * @param prev_delivered the last frame handed over, < 0 if none yet (then nothing counts as lost)
+ */
+CHIAKI_EXPORT int32_t chiaki_video_receiver_frames_lost_between(int32_t prev_delivered, int32_t cur);
 
 static inline ChiakiVideoReceiver *chiaki_video_receiver_new(struct chiaki_session_t *session, ChiakiPacketStats *packet_stats)
 {

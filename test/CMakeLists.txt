@@ -19,6 +19,7 @@ set(CHIAKI_UNIT_SOURCES
 				sock.c
 				keystate.c
 				feedback.c
+				videoreceiver.c
 				reorderqueue.c
 				fec.c
 				test_log.c
