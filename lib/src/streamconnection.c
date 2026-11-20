@@ -74,6 +74,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_init(ChiakiStreamConnecti
 	stream_connection->streaminfo_early_buf_size = 0;
 	stream_connection->player_index = 0;
 	memset(stream_connection->led_state, 0, sizeof(stream_connection->led_state));
+	stream_connection->target_bitrate = 0;
 
 	stream_connection->haptic_intensity = Strong;
 	stream_connection->trigger_intensity = Strong;
@@ -693,6 +694,8 @@ static void stream_connection_takion_data_idle(ChiakiStreamConnection *stream_co
 	case tkproto_TakionMessage_PayloadType_CONNECTIONQUALITY:
 	{
 		tkproto_ConnectionQualityPayload q = msg.connection_quality_payload;
+		if(q.has_target_bitrate)
+			stream_connection->target_bitrate = q.target_bitrate;
 		CHIAKI_LOGV(
 			stream_connection->log,
 			"StreamConnection received connection quality: target_bitrate=%d, "
