@@ -476,6 +476,9 @@ static void *session_thread_func(void *arg)
 		chiaki_cond_timedwait_pred(&session->state_cond, &session->state_mutex, 10000, session_check_state_pred_regist, session);
 		chiaki_regist_stop(&regist);
 		chiaki_regist_fini(&regist);
+		// A failed registration stops the session with its own reason, which CHECK_STOP would turn into Stopped
+		if(session->quit_reason == CHIAKI_QUIT_REASON_PSN_REGIST_FAILED)
+			QUIT(quit);
 		CHECK_STOP(quit);
 	}
 	if(session->auto_regist)
@@ -1132,9 +1135,9 @@ static void regist_cb(ChiakiRegistEvent *event, void *user)
 			chiaki_cond_signal(&session->state_cond);
 			break;
 		case CHIAKI_REGIST_EVENT_TYPE_FINISHED_CANCELED:
+			// Canceled by a stop or by the session giving up waiting: the session quits as Stopped
 			CHIAKI_LOGI(session->log, "PSN regist was canceled, exiting...");
 			chiaki_mutex_lock(&session->state_mutex);
-			session->quit_reason = CHIAKI_QUIT_REASON_PSN_REGIST_FAILED;
 			session->should_stop = true;
 			chiaki_mutex_unlock(&session->state_mutex);
 			chiaki_cond_signal(&session->state_cond);
