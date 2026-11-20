@@ -220,7 +220,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_recv_http_header(int sock, char *buf, size_
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_send_recv_http_header_psn(ChiakiRudp rudp, ChiakiLog *log,
 	uint16_t *remote_counter, char *send_buf, size_t send_buf_size,
-	char *buf, size_t buf_size, size_t *header_size, size_t *received_size)
+	char *buf, size_t buf_size, size_t *header_size, size_t *received_size, ChiakiStopPipe *stop_pipe)
 {
 	// 0 = ""
 	// 1 = "\r"
@@ -235,7 +235,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_send_recv_http_header_psn(ChiakiRudp rudp, 
 	size_t received;
 	RudpMessage message;
 	ChiakiErrorCode err;
-	err = chiaki_rudp_send_recv(rudp, &message, (uint8_t *)send_buf, send_buf_size, *remote_counter, SESSION_MESSAGE, CTRL_MESSAGE, 2, 3);
+	err = chiaki_rudp_send_recv(rudp, &message, (uint8_t *)send_buf, send_buf_size, *remote_counter, SESSION_MESSAGE, CTRL_MESSAGE, 2, 3, stop_pipe);
 	if(err != CHIAKI_ERR_SUCCESS)
 	{
 		CHIAKI_LOGE(log, "Didn't receive http session message response");

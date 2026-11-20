@@ -165,6 +165,8 @@ CHIAKI_EXPORT const char *chiaki_quit_reason_string(ChiakiQuitReason reason)
 			return "Remote has disconnected from Stream Connection the because Server shut down";
 		case CHIAKI_QUIT_REASON_PSN_REGIST_FAILED:
 			return "The Console Registration using PSN has failed";
+		case CHIAKI_QUIT_REASON_PSN_REGIST_UNANSWERED:
+			return "The Console didn't answer the Registration using PSN";
 		case CHIAKI_QUIT_REASON_NONE:
 		default:
 			return "Unknown";
@@ -481,7 +483,8 @@ static void *session_thread_func(void *arg)
 		chiaki_regist_fini(&regist);
 		chiaki_mutex_lock(&session->state_mutex);
 		// A failed registration stops the session with its own reason, which CHECK_STOP would turn into Stopped
-		if(session->quit_reason == CHIAKI_QUIT_REASON_PSN_REGIST_FAILED)
+		if(session->quit_reason == CHIAKI_QUIT_REASON_PSN_REGIST_FAILED
+			|| session->quit_reason == CHIAKI_QUIT_REASON_PSN_REGIST_UNANSWERED)
 			QUIT(quit);
 		CHECK_STOP(quit);
 	}
@@ -772,7 +775,7 @@ static ChiakiErrorCode session_thread_request_session(ChiakiSession *session, Ch
 	{
 		CHIAKI_LOGI(session->log, "SESSION START THREAD - Starting RUDP session");
 		RudpMessage message;
-		ChiakiErrorCode err = chiaki_rudp_send_recv(session->rudp, &message, NULL, 0, 0, INIT_REQUEST, INIT_RESPONSE, 8, 3);
+		ChiakiErrorCode err = chiaki_rudp_send_recv(session->rudp, &message, NULL, 0, 0, INIT_REQUEST, INIT_RESPONSE, 8, 3, NULL);
 		if(err != CHIAKI_ERR_SUCCESS)
 		{
 			CHIAKI_LOGE(session->log, "SESSION START THREAD - Failed to init rudp");
@@ -782,7 +785,7 @@ static ChiakiErrorCode session_thread_request_session(ChiakiSession *session, Ch
 		uint8_t init_response[init_response_size];
 		memcpy(init_response, message.data + 8, init_response_size);
 		chiaki_rudp_message_pointers_free(&message);
-		err = chiaki_rudp_send_recv(session->rudp, &message, init_response, init_response_size, 0, COOKIE_REQUEST, COOKIE_RESPONSE, 2, 3);
+		err = chiaki_rudp_send_recv(session->rudp, &message, init_response, init_response_size, 0, COOKIE_REQUEST, COOKIE_RESPONSE, 2, 3, NULL);
 		if(err != CHIAKI_ERR_SUCCESS)
 		{
 			CHIAKI_LOGE(session->log, "SESSION START THREAD - Failed to pass rudp cookie");
@@ -989,7 +992,7 @@ static ChiakiErrorCode session_thread_request_session(ChiakiSession *session, Ch
 	size_t received_size;
 	chiaki_mutex_unlock(&session->state_mutex);
 	if(session->rudp)
-		err = chiaki_send_recv_http_header_psn(session->rudp, session->log, &remote_counter, send_buf, request_len, buf, sizeof(buf), &header_size, &received_size);
+		err = chiaki_send_recv_http_header_psn(session->rudp, session->log, &remote_counter, send_buf, request_len, buf, sizeof(buf), &header_size, &received_size, NULL);
 	else
 		err = chiaki_recv_http_header(session_sock, buf, sizeof(buf), &header_size, &received_size, &session->stop_pipe, SESSION_EXPECT_TIMEOUT_MS);
 	ChiakiErrorCode mutex_err = chiaki_mutex_lock(&session->state_mutex);
@@ -1015,7 +1018,7 @@ static ChiakiErrorCode session_thread_request_session(ChiakiSession *session, Ch
 	if(session->rudp)
 	{
 		RudpMessage message;
-		err = chiaki_rudp_send_recv(session->rudp, &message, NULL, 0, remote_counter, ACK, FINISH, 0, 3);
+		err = chiaki_rudp_send_recv(session->rudp, &message, NULL, 0, remote_counter, ACK, FINISH, 0, 3, NULL);
 		if(err != CHIAKI_ERR_SUCCESS)
 			CHIAKI_LOGW(session->log, "SESSION START THREAD - Failed to finish rudp, continuing...");
 		else
@@ -1150,7 +1153,9 @@ static void regist_cb(ChiakiRegistEvent *event, void *user)
 			CHIAKI_LOGI(session->log, "PSN regist failed, exiting...");
 			chiaki_mutex_lock(&session->state_mutex);
 			if(!session->should_stop) // after a stop, the stop is the reason
-				session->quit_reason = CHIAKI_QUIT_REASON_PSN_REGIST_FAILED;
+				session->quit_reason = event->console_answered
+					? CHIAKI_QUIT_REASON_PSN_REGIST_FAILED
+					: CHIAKI_QUIT_REASON_PSN_REGIST_UNANSWERED;
 			session->should_stop = true;
 			chiaki_mutex_unlock(&session->state_mutex);
 			chiaki_cond_signal(&session->state_cond);

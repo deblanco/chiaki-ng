@@ -284,10 +284,13 @@ static void *regist_thread_func(void *user)
 	{
 		CHIAKI_LOGI(regist->log, "REGIST - Starting RUDP session");
 		RudpMessage message;
-		err = chiaki_rudp_send_recv(regist->info.rudp, &message, NULL, 0, 0, INIT_REQUEST, INIT_RESPONSE, 8, 3);
+		err = chiaki_rudp_send_recv(regist->info.rudp, &message, NULL, 0, 0, INIT_REQUEST, INIT_RESPONSE, 8, 3, &regist->stop_pipe);
 		if(err != CHIAKI_ERR_SUCCESS)
 		{
-			CHIAKI_LOGE(regist->log, "REGIST - Failed to init rudp");
+			if(err == CHIAKI_ERR_CANCELED)
+				canceled = true;
+			else
+				CHIAKI_LOGE(regist->log, "REGIST - Failed to init rudp");
 			goto fail;
 		}
 		console_answered = true;
@@ -295,10 +298,13 @@ static void *regist_thread_func(void *user)
 		uint8_t init_response[init_response_size];
 		memcpy(init_response, message.data + 8, init_response_size);
 		chiaki_rudp_message_pointers_free(&message);
-		err = chiaki_rudp_send_recv(regist->info.rudp, &message, init_response, init_response_size, 0, COOKIE_REQUEST, COOKIE_RESPONSE, 2, 3);
+		err = chiaki_rudp_send_recv(regist->info.rudp, &message, init_response, init_response_size, 0, COOKIE_REQUEST, COOKIE_RESPONSE, 2, 3, &regist->stop_pipe);
 		if(err != CHIAKI_ERR_SUCCESS)
 		{
-			CHIAKI_LOGE(regist->log, "REGIST - Failed to pass rudp cookie");
+			if(err == CHIAKI_ERR_CANCELED)
+				canceled = true;
+			else
+				CHIAKI_LOGE(regist->log, "REGIST - Failed to pass rudp cookie");
 			goto fail;
 		}
 		remote_counter = message.remote_counter;
@@ -716,7 +722,7 @@ static ChiakiErrorCode regist_recv_response(ChiakiRegist *regist, ChiakiRegister
 	ChiakiErrorCode err;
 	if(regist->info.holepunch_info)
 	{
-		err = chiaki_send_recv_http_header_psn(regist->info.rudp, regist->log, &remote_counter, send_buf, send_buf_size, (char *)buf, sizeof(buf), &header_size, &buf_filled_size);
+		err = chiaki_send_recv_http_header_psn(regist->info.rudp, regist->log, &remote_counter, send_buf, send_buf_size, (char *)buf, sizeof(buf), &header_size, &buf_filled_size, &regist->stop_pipe);
 		free(send_buf);
 	}
 	else
@@ -732,7 +738,7 @@ static ChiakiErrorCode regist_recv_response(ChiakiRegist *regist, ChiakiRegister
 	if(regist->info.holepunch_info)
 	{
 		RudpMessage message;
-		err = chiaki_rudp_send_recv(regist->info.rudp, &message, NULL, 0, remote_counter, ACK, FINISH, 0, 3);
+		err = chiaki_rudp_send_recv(regist->info.rudp, &message, NULL, 0, remote_counter, ACK, FINISH, 0, 3, &regist->stop_pipe);
 		if(err != CHIAKI_ERR_SUCCESS)
 			CHIAKI_LOGW(regist->log, "REGIST - Failed to finish rudp, continuing...");
 		else

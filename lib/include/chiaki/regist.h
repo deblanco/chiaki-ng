@@ -85,6 +85,8 @@ typedef struct chiaki_regist_event_t
 	 * CHIAKI_ERR_INVALID_RESPONSE, CHIAKI_ERR_INVALID_DATA, CHIAKI_ERR_BUF_TOO_SMALL: its reply couldn't be used;
 	 * anything else (a timeout, a refused or failed request connection, a dropped connection): the console stopped
 	 * answering, e.g. its screen was closed or the network dropped.
+	 * A PSN registration's RUDP steps report CHIAKI_ERR_INVALID_RESPONSE when none of their tries got the expected
+	 * reply, answered or not: console_answered tells a console that never answered from one that stopped.
 	 */
 	ChiakiErrorCode error;
 	/**

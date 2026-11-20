@@ -165,12 +165,14 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_rudp_send_raw(ChiakiRudp rudp,
  * @param[in] recv_type The RudpPacketType of that we want to receive (success when received, otherwise failure)
  * @param[in] min_data_size The minimum size of the Rudp Message data for the response message to be considered valid
  * @param[in] tries The amount of times to try to receive a message of receive type in response to our sent message before giving up
+ * @param stop_pipe Optional: a stop on it ends the wait with CHIAKI_ERR_CANCELED. NULL uses the rudp instance's own.
  *
 */
 CHIAKI_EXPORT ChiakiErrorCode chiaki_rudp_send_recv(ChiakiRudp rudp,
     RudpMessage *message, uint8_t *buf, size_t buf_size,
     uint16_t remote_counter, RudpPacketType send_type,
-    RudpPacketType recv_type, size_t min_data_size, size_t tries);
+    RudpPacketType recv_type, size_t min_data_size, size_t tries,
+    ChiakiStopPipe *stop_pipe);
 
 /**
  * Selects an incoming message from the queue and receives the rudp message

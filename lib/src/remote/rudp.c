@@ -31,6 +31,7 @@ static ChiakiErrorCode chiaki_rudp_message_parse(uint8_t *serialized_msg, size_t
 static void rudp_message_serialize(RudpMessage *message, uint8_t *serialized_msg, size_t *msg_size);
 static void print_rudp_message_type(RudpInstance *rudp, RudpPacketType type);
 static bool assign_submessage_to_message(RudpMessage *message);
+static ChiakiErrorCode rudp_select_recv(RudpInstance *rudp, ChiakiStopPipe *stop_pipe, size_t buf_size, RudpMessage *message);
 
 
 CHIAKI_EXPORT RudpInstance *chiaki_rudp_init(chiaki_socket_t *sock, ChiakiLog *log)
@@ -393,8 +394,13 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_rudp_send_raw(RudpInstance *rudp, uint8_t *
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_rudp_select_recv(RudpInstance *rudp, size_t buf_size,  RudpMessage *message)
 {
+	return rudp_select_recv(rudp, &rudp->stop_pipe, buf_size, message);
+}
+
+static ChiakiErrorCode rudp_select_recv(RudpInstance *rudp, ChiakiStopPipe *stop_pipe, size_t buf_size, RudpMessage *message)
+{
     uint8_t buf[buf_size]; 
-	ChiakiErrorCode err = chiaki_stop_pipe_select_single(&rudp->stop_pipe, rudp->sock, false, RUDP_EXPECT_TIMEOUT_MS);
+	ChiakiErrorCode err = chiaki_stop_pipe_select_single(stop_pipe, rudp->sock, false, RUDP_EXPECT_TIMEOUT_MS);
 	if(err == CHIAKI_ERR_TIMEOUT || err == CHIAKI_ERR_CANCELED)
 		return err;
 	if(err != CHIAKI_ERR_SUCCESS)
@@ -453,7 +459,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_rudp_stop_pipe_select_single(RudpInstance *
     return CHIAKI_ERR_SUCCESS;
 }
 
-CHIAKI_EXPORT ChiakiErrorCode chiaki_rudp_send_recv(RudpInstance *rudp, RudpMessage *message, uint8_t *buf, size_t buf_size, uint16_t remote_counter, RudpPacketType send_type, RudpPacketType recv_type, size_t min_data_size, size_t tries)
+CHIAKI_EXPORT ChiakiErrorCode chiaki_rudp_send_recv(RudpInstance *rudp, RudpMessage *message, uint8_t *buf, size_t buf_size, uint16_t remote_counter, RudpPacketType send_type, RudpPacketType recv_type, size_t min_data_size, size_t tries, ChiakiStopPipe *stop_pipe)
 {
     bool success = false;
     for(int i = 0; i < tries; i++)
@@ -476,7 +482,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_rudp_send_recv(RudpInstance *rudp, RudpMess
                 CHIAKI_LOGE(rudp->log, "Selected RudpPacketType 0x%04x to send that is not supported by rudp send receive.", send_type);
                 return CHIAKI_ERR_INVALID_DATA;
         }
-        ChiakiErrorCode err = chiaki_rudp_select_recv(rudp, 1500, message);
+        ChiakiErrorCode err = rudp_select_recv(rudp, stop_pipe ? stop_pipe : &rudp->stop_pipe, 1500, message);
         if(err == CHIAKI_ERR_TIMEOUT)
             continue;
         if(err != CHIAKI_ERR_SUCCESS)

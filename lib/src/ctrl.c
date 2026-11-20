@@ -1223,7 +1223,7 @@ static ChiakiErrorCode ctrl_connect(ChiakiCtrl *ctrl)
 	{
 		CHIAKI_LOGI(session->log, "CTRL - Starting RUDP session");
 		RudpMessage message;
-		ChiakiErrorCode err = chiaki_rudp_send_recv(session->rudp, &message, NULL, 0, 0, INIT_REQUEST, INIT_RESPONSE, 8, 3);
+		ChiakiErrorCode err = chiaki_rudp_send_recv(session->rudp, &message, NULL, 0, 0, INIT_REQUEST, INIT_RESPONSE, 8, 3, NULL);
 		if(err != CHIAKI_ERR_SUCCESS)
 		{
 			CHIAKI_LOGE(session->log, "CTRL - Failed to init rudp");
@@ -1233,7 +1233,7 @@ static ChiakiErrorCode ctrl_connect(ChiakiCtrl *ctrl)
 		uint8_t init_response[init_response_size];
 		memcpy(init_response, message.data + 8, init_response_size);
 		chiaki_rudp_message_pointers_free(&message);
-		err = chiaki_rudp_send_recv(session->rudp, &message, init_response, init_response_size, 0, COOKIE_REQUEST, COOKIE_RESPONSE, 2, 3);
+		err = chiaki_rudp_send_recv(session->rudp, &message, init_response, init_response_size, 0, COOKIE_REQUEST, COOKIE_RESPONSE, 2, 3, NULL);
 		if(err != CHIAKI_ERR_SUCCESS)
 		{
 			CHIAKI_LOGE(session->log, "CTRL - Failed to pass rudp cookie");
@@ -1390,7 +1390,7 @@ static ChiakiErrorCode ctrl_connect(ChiakiCtrl *ctrl)
 	{
 		if(session->rudp)
 		{
-			err = chiaki_send_recv_http_header_psn(session->rudp, session->log, &remote_counter, send_buf, request_len, buf, sizeof(buf), &header_size, &received_size);
+			err = chiaki_send_recv_http_header_psn(session->rudp, session->log, &remote_counter, send_buf, request_len, buf, sizeof(buf), &header_size, &received_size, NULL);
 		}
 		else
 		{
