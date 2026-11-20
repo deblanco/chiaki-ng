@@ -4,6 +4,10 @@
 
 #include <chiaki/rpcrypt.h>
 #include <chiaki/regist.h>
+#include <chiaki/session.h>
+
+#include <string.h>
+#include <stdlib.h>
 
 static const uint8_t ambassador[CHIAKI_RPCRYPT_KEY_SIZE] = { 0x13, 0x37, 0xde, 0xad, 0xbe, 0xef, 0xc0, 0xff, 0xee, 0x42, 0x63, 0x68, 0x69, 0x61, 0x6b, 0x69 };
 static const uint32_t pin = 13374201;
@@ -60,6 +64,36 @@ static MunitResult test_request_payload_ps4_pre10(const MunitParameter params[],
 	return MUNIT_OK;
 }
 
+static uint32_t application_reason_of(const char *response)
+{
+	char *buf = strdup(response);
+	munit_assert_ptr_not_null(buf);
+	ChiakiHttpResponse parsed;
+	munit_assert_int(chiaki_http_response_parse(&parsed, buf, strlen(buf)), ==, CHIAKI_ERR_SUCCESS);
+	uint32_t reason = chiaki_regist_response_application_reason(&parsed);
+	chiaki_http_response_fini(&parsed);
+	free(buf);
+	return reason;
+}
+
+static MunitResult test_response_application_reason(const MunitParameter params[], void *user)
+{
+	munit_assert_uint32(application_reason_of(
+			"HTTP/1.1 403 Forbidden\r\n"
+			"Content-Length: 0\r\n"
+			"RP-Application-Reason: 80108b09\r\n"
+			"\r\n"), ==, CHIAKI_RP_APPLICATION_REASON_REGIST_FAILED);
+	munit_assert_uint32(application_reason_of(
+			"HTTP/1.1 403 Forbidden\r\n"
+			"RP-Application-Reason: 0x80108b02\r\n"
+			"\r\n"), ==, CHIAKI_RP_APPLICATION_REASON_INVALID_PSN_ID);
+	munit_assert_uint32(application_reason_of(
+			"HTTP/1.1 403 Forbidden\r\n"
+			"Content-Length: 0\r\n"
+			"\r\n"), ==, 0);
+	return MUNIT_OK;
+}
+
 MunitTest tests_regist[] = {
 	{
 		"/aeropause_ps4_pre10",
@@ -80,6 +114,14 @@ MunitTest tests_regist[] = {
 	{
 		"/request_payload_ps4_pre10",
 		test_request_payload_ps4_pre10,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL
+	},
+	{
+		"/response_application_reason",
+		test_response_application_reason,
 		NULL,
 		NULL,
 		MUNIT_TEST_OPTION_NONE,

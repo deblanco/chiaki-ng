@@ -8,6 +8,7 @@
 #include "thread.h"
 #include "stoppipe.h"
 #include "rpcrypt.h"
+#include "http.h"
 #include "remote/holepunch.h"
 #include "remote/rudp.h"
 
@@ -71,6 +72,23 @@ typedef struct chiaki_regist_event_t
 {
 	ChiakiRegistEventType type;
 	ChiakiRegisteredHost *registered_host;
+
+	/**
+	 * Why a CHIAKI_REGIST_EVENT_TYPE_FINISHED_FAILED registration failed:
+	 * CHIAKI_ERR_TIMEOUT: the console didn't answer in time;
+	 * CHIAKI_ERR_CONNECTION_REFUSED: the console refused it (its Link Device (PS5) or Add Device (PS4) screen isn't open);
+	 * CHIAKI_ERR_HTTP_NONOK: the console rejected the request, see http_code and application_reason;
+	 * CHIAKI_ERR_NETWORK and other network errors: the console couldn't be reached.
+	 */
+	ChiakiErrorCode error;
+	/**
+	 * The console's HTTP status when it rejected the request, else 0.
+	 */
+	int http_code;
+	/**
+	 * The console's RP-Application-Reason (CHIAKI_RP_APPLICATION_REASON_*) when it rejected the request, else 0.
+	 */
+	uint32_t application_reason;
 } ChiakiRegistEvent;
 
 typedef void (*ChiakiRegistCb)(ChiakiRegistEvent *event, void *user);
@@ -89,6 +107,11 @@ typedef struct chiaki_regist_t
 CHIAKI_EXPORT ChiakiErrorCode chiaki_regist_start(ChiakiRegist *regist, ChiakiLog *log, const ChiakiRegistInfo *info, ChiakiRegistCb cb, void *cb_user);
 CHIAKI_EXPORT void chiaki_regist_fini(ChiakiRegist *regist);
 CHIAKI_EXPORT void chiaki_regist_stop(ChiakiRegist *regist);
+
+/**
+ * @return the RP-Application-Reason header of a regist response (hex), or 0 if it has none
+ */
+CHIAKI_EXPORT uint32_t chiaki_regist_response_application_reason(const ChiakiHttpResponse *response);
 
 /**
  * @param psn_account_id must be exactly of size CHIAKI_PSN_ACCOUNT_ID_SIZE

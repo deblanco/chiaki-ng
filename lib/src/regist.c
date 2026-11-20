@@ -33,7 +33,7 @@ static void *regist_thread_func(void *user);
 static ChiakiErrorCode regist_search(ChiakiRegist *regist, struct addrinfo *addrinfos, struct sockaddr *recv_addr, socklen_t *recv_addr_size);
 static chiaki_socket_t regist_search_connect(ChiakiRegist *regist, struct addrinfo *addrinfos, struct sockaddr *send_addr, socklen_t *send_addr_len);
 static ChiakiErrorCode regist_request_connect(ChiakiRegist *regist, const struct sockaddr *addr, size_t addr_len, chiaki_socket_t *sock_out);
-static ChiakiErrorCode regist_recv_response(ChiakiRegist *regist, ChiakiRegisteredHost *host, chiaki_socket_t sock, ChiakiRPCrypt *rpcrypt, uint16_t remote_counter, char *send_buf, size_t send_buf_size);
+static ChiakiErrorCode regist_recv_response(ChiakiRegist *regist, ChiakiRegisteredHost *host, chiaki_socket_t sock, ChiakiRPCrypt *rpcrypt, uint16_t remote_counter, char *send_buf, size_t send_buf_size, int *http_code, uint32_t *application_reason);
 static ChiakiErrorCode regist_parse_response_payload(ChiakiRegist *regist, ChiakiRegisteredHost *host, char *buf, size_t buf_size);
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_regist_start(ChiakiRegist *regist, ChiakiLog *log, const ChiakiRegistInfo *info, ChiakiRegistCb cb, void *cb_user)
@@ -236,6 +236,8 @@ static void *regist_thread_func(void *user)
 	bool canceled = false;
 	bool success = false;
 	bool psn = false;
+	int http_code = 0;
+	uint32_t application_reason = 0;
 	// if holepunch info is filled out, this is a psn regist
 	if(regist->info.holepunch_info)
 		psn = true;
@@ -314,6 +316,7 @@ static void *regist_thread_func(void *user)
 		if(r != 0)
 		{
 			CHIAKI_LOGE(regist->log, "Regist failed to getaddrinfo on %s", regist->info.host);
+			err = CHIAKI_ERR_PARSE_ADDR;
 			goto fail;
 		}
 
@@ -351,6 +354,7 @@ static void *regist_thread_func(void *user)
 	if(!psn)
 	{
 		ChiakiErrorCode send_err = chiaki_send_fully(&regist->stop_pipe, sock, (const uint8_t *)request_header, request_header_size, REGIST_REPONSE_TIMEOUT_MS);
+		err = send_err;
 		if(send_err != CHIAKI_ERR_SUCCESS)
 		{
 			if(send_err == CHIAKI_ERR_CANCELED)
@@ -381,6 +385,7 @@ static void *regist_thread_func(void *user)
 	else
 	{
 		ChiakiErrorCode send_err = chiaki_send_fully(&regist->stop_pipe, sock, payload, payload_size, REGIST_REPONSE_TIMEOUT_MS);
+		err = send_err;
 		if(send_err != CHIAKI_ERR_SUCCESS)
 		{
 			if(send_err == CHIAKI_ERR_CANCELED)
@@ -403,7 +408,7 @@ static void *regist_thread_func(void *user)
 
 
 	ChiakiRegisteredHost host;
-	err = regist_recv_response(regist, &host, sock, &crypt, remote_counter, send_buf, send_buf_size);
+	err = regist_recv_response(regist, &host, sock, &crypt, remote_counter, send_buf, send_buf_size, &http_code, &application_reason);
 	if(err != CHIAKI_ERR_SUCCESS)
 	{
 		if(err == CHIAKI_ERR_CANCELED)
@@ -444,8 +449,25 @@ fail:
 		regist->cb(&event, regist->cb_user);
 	}
 	else
-		regist_event_simple(regist, CHIAKI_REGIST_EVENT_TYPE_FINISHED_FAILED);
+	{
+		ChiakiRegistEvent event = { 0 };
+		event.type = CHIAKI_REGIST_EVENT_TYPE_FINISHED_FAILED;
+		event.error = err != CHIAKI_ERR_SUCCESS ? err : CHIAKI_ERR_UNKNOWN;
+		event.http_code = http_code;
+		event.application_reason = application_reason;
+		regist->cb(&event, regist->cb_user);
+	}
 	return NULL;
+}
+
+CHIAKI_EXPORT uint32_t chiaki_regist_response_application_reason(const ChiakiHttpResponse *response)
+{
+	for(ChiakiHttpHeader *header=response->headers; header; header=header->next)
+	{
+		if(strcmp(header->key, "RP-Application-Reason") == 0)
+			return (uint32_t)strtoul(header->value, NULL, 0x10);
+	}
+	return 0;
 }
 
 static ChiakiErrorCode regist_search(ChiakiRegist *regist, struct addrinfo *addrinfos, struct sockaddr *recv_addr, socklen_t *recv_addr_size)
@@ -508,10 +530,13 @@ static ChiakiErrorCode regist_search(ChiakiRegist *regist, struct addrinfo *addr
 				CHIAKI_LOGE(regist->log, "Regist failed to receive search response: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
 				if(refused)
 					CHIAKI_LOGE(regist->log, "The console refused the registration search, keep its Link Device (PS5) or Add Device (PS4) screen with the code open while registering");
+				err = refused ? CHIAKI_ERR_CONNECTION_REFUSED : CHIAKI_ERR_NETWORK;
 			}
 			else
+			{
 				CHIAKI_LOGE(regist->log, "Regist failed to receive search response");
-			err = CHIAKI_ERR_NETWORK;
+				err = CHIAKI_ERR_NETWORK;
+			}
 			goto done;
 		}
 
@@ -679,7 +704,7 @@ static ChiakiErrorCode regist_request_connect(ChiakiRegist *regist, const struct
 	return CHIAKI_ERR_SUCCESS;
 }
 
-static ChiakiErrorCode regist_recv_response(ChiakiRegist *regist, ChiakiRegisteredHost *host, chiaki_socket_t sock, ChiakiRPCrypt *rpcrypt, uint16_t remote_counter, char *send_buf, size_t send_buf_size)
+static ChiakiErrorCode regist_recv_response(ChiakiRegist *regist, ChiakiRegisteredHost *host, chiaki_socket_t sock, ChiakiRPCrypt *rpcrypt, uint16_t remote_counter, char *send_buf, size_t send_buf_size, int *http_code, uint32_t *application_reason)
 {
 	uint8_t buf[1500];
 	size_t buf_filled_size;
@@ -725,18 +750,14 @@ static ChiakiErrorCode regist_recv_response(ChiakiRegist *regist, ChiakiRegister
 	{
 		CHIAKI_LOGE(regist->log, "Regist received HTTP code %d", http_response.code);
 
-		for(ChiakiHttpHeader *header=http_response.headers; header; header=header->next)
-		{
-			if(strcmp(header->key, "RP-Application-Reason") == 0)
-			{
-				uint32_t reason = strtoul(header->value, NULL, 0x10);
-				CHIAKI_LOGE(regist->log, "Reported Application Reason: %#x (%s)", (unsigned int)reason, chiaki_rp_application_reason_string(reason));
-				break;
-			}
-		}
+		uint32_t reason = chiaki_regist_response_application_reason(&http_response);
+		if(reason)
+			CHIAKI_LOGE(regist->log, "Reported Application Reason: %#x (%s)", (unsigned int)reason, chiaki_rp_application_reason_string(reason));
+		*http_code = http_response.code;
+		*application_reason = reason;
 
 		chiaki_http_response_fini(&http_response);
-		return CHIAKI_ERR_UNKNOWN;
+		return CHIAKI_ERR_HTTP_NONOK;
 	}
 
 	size_t content_size = 0;
