@@ -474,8 +474,12 @@ static void *session_thread_func(void *arg)
 		info.target = session->connect_info.ps5 ? CHIAKI_TARGET_PS5_1 : CHIAKI_TARGET_PS4_10;
 		chiaki_regist_start(&regist, session->log, &info, regist_cb, session);
 		chiaki_cond_timedwait_pred(&session->state_cond, &session->state_mutex, 10000, session_check_state_pred_regist, session);
+		// The regist thread's last act is regist_cb, which takes state_mutex: holding it through the join deadlocks
+		// whenever the wait ended (a stop, or the 10 s running out) before the registration did
+		chiaki_mutex_unlock(&session->state_mutex);
 		chiaki_regist_stop(&regist);
 		chiaki_regist_fini(&regist);
+		chiaki_mutex_lock(&session->state_mutex);
 		// A failed registration stops the session with its own reason, which CHECK_STOP would turn into Stopped
 		if(session->quit_reason == CHIAKI_QUIT_REASON_PSN_REGIST_FAILED)
 			QUIT(quit);
@@ -1145,7 +1149,8 @@ static void regist_cb(ChiakiRegistEvent *event, void *user)
 		case CHIAKI_REGIST_EVENT_TYPE_FINISHED_FAILED:
 			CHIAKI_LOGI(session->log, "PSN regist failed, exiting...");
 			chiaki_mutex_lock(&session->state_mutex);
-			session->quit_reason = CHIAKI_QUIT_REASON_PSN_REGIST_FAILED;
+			if(!session->should_stop) // after a stop, the stop is the reason
+				session->quit_reason = CHIAKI_QUIT_REASON_PSN_REGIST_FAILED;
 			session->should_stop = true;
 			chiaki_mutex_unlock(&session->state_mutex);
 			chiaki_cond_signal(&session->state_cond);

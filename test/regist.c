@@ -5,6 +5,8 @@
 #include <chiaki/rpcrypt.h>
 #include <chiaki/regist.h>
 #include <chiaki/session.h>
+#include <chiaki/thread.h>
+#include <chiaki/remote/holepunch.h>
 
 #include "test_log.h"
 
@@ -170,6 +172,85 @@ static MunitResult test_failure_after_the_console_answered(const MunitParameter 
 	return MUNIT_OK;
 }
 
+static void record_quit(ChiakiEvent *event, void *user)
+{
+	if(event->type == CHIAKI_EVENT_QUIT)
+		*(ChiakiQuitReason *)user = event->quit.reason;
+}
+
+typedef struct
+{
+	ChiakiSession session;
+	ChiakiQuitReason quit_reason;
+	ChiakiBoolPredCond joined;
+} StoppedSession;
+
+static void *join_session(void *user)
+{
+	StoppedSession *stopped = user;
+	chiaki_session_join(&stopped->session);
+	chiaki_bool_pred_cond_signal(&stopped->joined);
+	return NULL;
+}
+
+static MunitResult test_psn_stop_while_registering(const MunitParameter params[], void *user)
+{
+	// A stand-in console on loopback receives the PSN registration's RUDP init and never answers, as a slow PS5.
+	chiaki_socket_t console = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	munit_assert_false(CHIAKI_SOCKET_IS_INVALID(console));
+	struct sockaddr_in addr = { 0 };
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	socklen_t addr_size = sizeof(addr);
+	munit_assert_int(bind(console, (struct sockaddr *)&addr, sizeof(addr)), ==, 0);
+	munit_assert_int(getsockname(console, (struct sockaddr *)&addr, &addr_size), ==, 0);
+	struct timeval timeout = { 5, 0 };
+	setsockopt(console, SOL_SOCKET, SO_RCVTIMEO, (const void *)&timeout, sizeof(timeout));
+	chiaki_socket_t ctrl = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	munit_assert_int(connect(ctrl, (struct sockaddr *)&addr, sizeof(addr)), ==, 0);
+
+	// The holepunch session stands for a punched hole: only its control socket is used (rudp closes it).
+	ChiakiHolepunchSession holepunch = chiaki_holepunch_session_init("token", get_test_log());
+	munit_assert_ptr_not_null(holepunch);
+	*chiaki_get_holepunch_sock(holepunch, CHIAKI_HOLEPUNCH_PORT_TYPE_CTRL) = ctrl;
+	ChiakiConnectInfo connect_info = { 0 };
+	connect_info.ps5 = true;
+	connect_info.auto_regist = true;
+	connect_info.holepunch_session = holepunch;
+
+	// On the heap: a session that never joins can't be freed, and its threads must not outlive the stack.
+	StoppedSession *stopped = calloc(1, sizeof(StoppedSession));
+	munit_assert_ptr_not_null(stopped);
+	stopped->quit_reason = CHIAKI_QUIT_REASON_NONE;
+	munit_assert_int(chiaki_bool_pred_cond_init(&stopped->joined), ==, CHIAKI_ERR_SUCCESS);
+	munit_assert_int(chiaki_session_init(&stopped->session, &connect_info, get_test_log()), ==, CHIAKI_ERR_SUCCESS);
+	chiaki_session_set_event_cb(&stopped->session, record_quit, &stopped->quit_reason);
+	munit_assert_int(chiaki_session_start(&stopped->session), ==, CHIAKI_ERR_SUCCESS);
+
+	uint8_t init[64];
+	munit_assert_int((int)recv(console, (CHIAKI_SOCKET_BUF_TYPE)init, sizeof(init), 0), >, 0); // registering
+
+	// Stopped mid-registration, the session must still end: the registration fails a few seconds later (no
+	// answer), and its callback needs the session's state mutex while the session thread waits for it.
+	chiaki_session_stop(&stopped->session);
+	ChiakiThread joiner;
+	munit_assert_int(chiaki_thread_create(&joiner, join_session, stopped), ==, CHIAKI_ERR_SUCCESS);
+	chiaki_bool_pred_cond_lock(&stopped->joined);
+	ChiakiErrorCode err = chiaki_bool_pred_cond_timedwait(&stopped->joined, 15000);
+	chiaki_bool_pred_cond_unlock(&stopped->joined);
+	CHIAKI_SOCKET_CLOSE(console);
+	if(err != CHIAKI_ERR_SUCCESS)
+		munit_error("the stopped session never ended: deadlocked on its state mutex"); // leaves it, still blocked
+
+	chiaki_thread_join(&joiner, NULL);
+	// The stop is the reason, not the registration that failed after it
+	munit_assert_int(stopped->quit_reason, ==, CHIAKI_QUIT_REASON_STOPPED);
+	chiaki_session_fini(&stopped->session);
+	chiaki_bool_pred_cond_fini(&stopped->joined);
+	free(stopped);
+	return MUNIT_OK;
+}
+
 MunitTest tests_regist[] = {
 	{
 		"/aeropause_ps4_pre10",
@@ -214,6 +295,14 @@ MunitTest tests_regist[] = {
 	{
 		"/failure_after_the_console_answered",
 		test_failure_after_the_console_answered,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL
+	},
+	{
+		"/psn_stop_while_registering",
+		test_psn_stop_while_registering,
 		NULL,
 		NULL,
 		MUNIT_TEST_OPTION_NONE,
