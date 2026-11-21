@@ -28,6 +28,7 @@ set(HEADER_FILES
 		include/chiaki/congestioncontrol.h
 		include/chiaki/stoppipe.h
 		include/chiaki/reorderqueue.h
+		include/chiaki/reorderwait.h
 		include/chiaki/discoveryservice.h
 		include/chiaki/feedback.h
 		include/chiaki/feedbacksender.h
@@ -73,6 +74,7 @@ set(SOURCE_FILES
 		src/congestioncontrol.c
 		src/stoppipe.c
 		src/reorderqueue.c
+		src/reorderwait.c
 		src/discoveryservice.c
 		src/feedback.c
 		src/feedbacksender.c

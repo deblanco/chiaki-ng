@@ -21,6 +21,7 @@ set(CHIAKI_UNIT_SOURCES
 				feedback.c
 				videoreceiver.c
 				reorderqueue.c
+				reorderwait.c
 				fec.c
 				test_log.c
 				test_log.h

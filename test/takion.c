@@ -494,6 +494,98 @@ static MunitResult test_takion_av_queue_full_skips_holes(const MunitParameter pa
 
 	const uint16_t missing[] = { 1, 257 };
 	takion_av_test_assert_delivered(&test, 0, 300, missing, 2);
+	ChiakiReorderWaitStats stats;
+	chiaki_takion_video_reorder_stats(&test.takion, &stats);
+	munit_assert_uint32(stats.overflow_skips, ==, 1);
+	takion_av_test_stop(&test);
+	return MUNIT_OK;
+#endif
+}
+
+static MunitResult test_takion_av_hole_filled_while_waiting(const MunitParameter params[], void *user)
+{
+#ifdef _WIN32
+	return MUNIT_SKIP;
+#else
+	TakionAVTest test;
+	takion_av_test_start(&test);
+	ChiakiReorderWaitStats stats;
+	chiaki_takion_video_reorder_stats(&test.takion, &stats);
+	munit_assert_uint32(stats.wait_us, ==, CHIAKI_REORDER_WAIT_INITIAL_US);
+
+	// 1 and 2 come 2 ms after 3: one hole, filled well within the wait
+	takion_av_test_send(&test, 0);
+	takion_av_test_send(&test, 3);
+	takion_av_test_send(&test, 4);
+	chiaki_stop_pipe_sleep(&test.takion.stop_pipe, 2);
+	takion_av_test_send(&test, 1);
+	takion_av_test_send(&test, 2);
+	takion_av_test_wait_delivered(&test, 4);
+
+	takion_av_test_assert_delivered(&test, 0, 4, NULL, 0);
+	chiaki_takion_video_reorder_stats(&test.takion, &stats);
+	munit_assert_uint32(stats.holes_filled, ==, 1);
+	munit_assert_uint32(stats.late_packets, ==, 0);
+	munit_assert_uint32(stats.wait_us, <, CHIAKI_REORDER_WAIT_INITIAL_US);
+	takion_av_test_stop(&test);
+	return MUNIT_OK;
+#endif
+}
+
+static MunitResult test_takion_av_late_packet_raises_wait(const MunitParameter params[], void *user)
+{
+#ifdef _WIN32
+	return MUNIT_SKIP;
+#else
+	TakionAVTest test;
+	takion_av_test_start(&test);
+
+	// 1 comes 10 ms after the 16 ms wait for it ran out
+	takion_av_test_send(&test, 0);
+	takion_av_test_send(&test, 2);
+	takion_av_test_wait_delivered(&test, 2);
+	chiaki_stop_pipe_sleep(&test.takion.stop_pipe, 10);
+	takion_av_test_send(&test, 1);
+	takion_av_test_send(&test, 3);
+	takion_av_test_wait_delivered(&test, 3);
+
+	const uint16_t missing[] = { 1 };
+	takion_av_test_assert_delivered(&test, 0, 3, missing, 1);
+	ChiakiReorderWaitStats stats;
+	chiaki_takion_video_reorder_stats(&test.takion, &stats);
+	munit_assert_uint32(stats.late_packets, ==, 1);
+	munit_assert_uint32(stats.holes_filled, ==, 0);
+	munit_assert_uint32(stats.wait_us, ==, CHIAKI_REORDER_WAIT_MAX_US); // 1.25 × 26 ms, clamped
+	takion_av_test_stop(&test);
+	return MUNIT_OK;
+#endif
+}
+
+static MunitResult test_takion_av_duplicates_are_not_late(const MunitParameter params[], void *user)
+{
+#ifdef _WIN32
+	return MUNIT_SKIP;
+#else
+	TakionAVTest test;
+	takion_av_test_start(&test);
+
+	takion_av_test_send(&test, 0);
+	takion_av_test_send(&test, 2);
+	takion_av_test_wait_delivered(&test, 2); // 1 skipped
+	takion_av_test_send(&test, 1);
+	takion_av_test_send(&test, 1); // again
+	takion_av_test_send(&test, 0); // delivered before the hole
+	takion_av_test_send(&test, 2); // delivered after it
+	takion_av_test_send(&test, 3);
+	takion_av_test_send(&test, 3); // delivered, and now older than the queue's start
+	takion_av_test_send(&test, 4);
+	takion_av_test_wait_delivered(&test, 4);
+
+	const uint16_t missing[] = { 1 };
+	takion_av_test_assert_delivered(&test, 0, 4, missing, 1);
+	ChiakiReorderWaitStats stats;
+	chiaki_takion_video_reorder_stats(&test.takion, &stats);
+	munit_assert_uint32(stats.late_packets, ==, 1);
 	takion_av_test_stop(&test);
 	return MUNIT_OK;
 #endif
@@ -535,6 +627,30 @@ MunitTest tests_takion[] = {
 	{
 		"/av_queue_full_skips_holes",
 		test_takion_av_queue_full_skips_holes,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL
+	},
+	{
+		"/av_hole_filled_while_waiting",
+		test_takion_av_hole_filled_while_waiting,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL
+	},
+	{
+		"/av_late_packet_raises_wait",
+		test_takion_av_late_packet_raises_wait,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL
+	},
+	{
+		"/av_duplicates_are_not_late",
+		test_takion_av_duplicates_are_not_late,
 		NULL,
 		NULL,
 		MUNIT_TEST_OPTION_NONE,

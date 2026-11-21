@@ -10,6 +10,7 @@
 #include "seqnum.h"
 #include "stoppipe.h"
 #include "reorderqueue.h"
+#include "reorderwait.h"
 #include "feedback.h"
 #include "takionsendbuffer.h"
 
@@ -155,8 +156,10 @@ typedef struct chiaki_takion_t
 	ChiakiReorderQueue data_queue;
 	ChiakiReorderQueue video_queue;
 	bool video_queue_initialized;
-	int64_t video_queue_head_wait_start_us;
-	uint64_t video_queue_head_wait_seq_num;
+	int64_t video_queue_head_wait_start_us; // when the hole at the head started waiting, 0 = none
+	uint64_t video_queue_hole_end; // the first packet after that hole, when it started waiting
+	ChiakiReorderWait video_reorder_wait; // the receive thread's
+	ChiakiReorderWaitStats video_reorder_stats; // published, see chiaki_takion_video_reorder_stats()
 	ChiakiTakionSendBuffer send_buffer;
 	/**
 	 * send_buffer only exists from the end of the handshake until the receive loop ends.
@@ -192,6 +195,12 @@ typedef struct chiaki_takion_t
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, ChiakiTakionConnectInfo *info, chiaki_socket_t *sock);
 CHIAKI_EXPORT void chiaki_takion_close(ChiakiTakion *takion);
+
+/**
+ * The video reorder wait and its counters for this connection (reorderwait.h). Safe from any thread, as
+ * long as takion's memory is: all zero before the connection's receive thread starts.
+ */
+CHIAKI_EXPORT void chiaki_takion_video_reorder_stats(ChiakiTakion *takion, ChiakiReorderWaitStats *stats);
 
 /**
  * Must be called from within the Takion thread, i.e. inside the callback!

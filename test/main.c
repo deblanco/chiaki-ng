@@ -10,6 +10,7 @@ extern MunitTest tests_key_state[];
 extern MunitTest tests_feedback[];
 extern MunitTest tests_video_receiver[];
 extern MunitTest tests_reorder_queue[];
+extern MunitTest tests_reorder_wait[];
 extern MunitTest tests_http[];
 extern MunitTest tests_rpcrypt[];
 extern MunitTest tests_gkcrypt[];
@@ -70,6 +71,13 @@ static MunitSuite suites[] = {
 	{
 		"/reorder_queue",
 		tests_reorder_queue,
+		NULL,
+		1,
+		MUNIT_SUITE_OPTION_NONE
+	},
+	{
+		"/reorder_wait",
+		tests_reorder_wait,
 		NULL,
 		1,
 		MUNIT_SUITE_OPTION_NONE

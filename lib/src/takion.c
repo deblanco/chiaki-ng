@@ -44,7 +44,6 @@
 
 #define TAKION_REORDER_QUEUE_SIZE_EXP 4 // => 16 entries
 #define TAKION_AV_VIDEO_REORDER_QUEUE_SIZE_EXP 8 // => 256 entries: a 1080p frame can be more than 64 packets
-#define TAKION_AV_REORDER_TIMEOUT_US 16000 // ~1 frame at 60fps
 
 #define TAKION_POSTPONE_PACKETS_SIZE 32
 
@@ -1041,29 +1040,60 @@ static bool takion_av_queue_pull_all(ChiakiTakion *takion, ChiakiReorderQueue *q
 }
 
 /**
- * Skip the missing packets at the head of the queue, up to the first buffered one.
- * @return how many were skipped (0 if the head isn't missing or nothing is buffered)
+ * @return how many packets are missing at the head of the queue, before the first buffered one
  */
-static uint64_t takion_av_queue_skip_missing_head(ChiakiTakion *takion, ChiakiReorderQueue *queue, const char *why)
+static uint64_t takion_av_queue_missing_head(ChiakiReorderQueue *queue)
 {
-	uint64_t skipped = 0;
-	while(skipped < queue->count)
+	uint64_t missing = 0;
+	while(missing < queue->count)
 	{
 		uint64_t seq_num_peek;
 		void *entry_user;
-		if(chiaki_reorder_queue_peek(queue, skipped, &seq_num_peek, &entry_user))
+		if(chiaki_reorder_queue_peek(queue, missing, &seq_num_peek, &entry_user))
 			break;
-		skipped++;
+		missing++;
 	}
+	return missing;
+}
+
+/**
+ * Skip the missing packets at the head of the queue, up to the first buffered one, and remember them as
+ * a skipped hole (waiting since hole_start_us) to recognize their late packets.
+ * @return how many were skipped (0 if the head isn't missing or nothing is buffered)
+ */
+static uint64_t takion_av_queue_skip_missing_head(ChiakiTakion *takion, ChiakiReorderQueue *queue, const char *why,
+		int64_t hole_start_us, int64_t now, bool overflow)
+{
+	uint64_t skipped = takion_av_queue_missing_head(queue);
 	if(skipped == 0 || skipped >= queue->count)
 		return 0;
 
 	CHIAKI_LOGD(takion->log, "Takion AV %s: skipping %llu missing packet(s) before %#llx", why,
 		(unsigned long long)skipped,
 		(unsigned long long)queue->seq_num_add(queue->begin, skipped));
+	chiaki_reorder_wait_skipped(&takion->video_reorder_wait, (ChiakiSeqNum16)queue->begin, skipped, hole_start_us, now, overflow);
 	queue->begin = queue->seq_num_add(queue->begin, skipped);
 	queue->count -= skipped;
 	return skipped;
+}
+
+/**
+ * Publishes the reorder wait's stats for other threads, and logs the wait when it moved.
+ */
+static void takion_av_reorder_wait_publish(ChiakiTakion *takion, int64_t now)
+{
+	ChiakiReorderWait *wait = &takion->video_reorder_wait;
+	chiaki_reorder_wait_stats_publish(wait, &takion->video_reorder_stats);
+	if(chiaki_reorder_wait_log_due(wait, now))
+		CHIAKI_LOGI(takion->log, "Takion AV reorder wait now %.1f ms (holes filled while waiting: %u, late packets: %u, holes lost: %u, queue full: %u)",
+			(double)chiaki_reorder_wait_us(wait) / 1000.0,
+			(unsigned int)wait->stats.holes_filled, (unsigned int)wait->stats.late_packets,
+			(unsigned int)wait->stats.holes_lost, (unsigned int)wait->stats.overflow_skips);
+}
+
+CHIAKI_EXPORT void chiaki_takion_video_reorder_stats(ChiakiTakion *takion, ChiakiReorderWaitStats *stats)
+{
+	chiaki_reorder_wait_stats_load(&takion->video_reorder_stats, stats);
 }
 
 /**
@@ -1072,15 +1102,17 @@ static uint64_t takion_av_queue_skip_missing_head(ChiakiTakion *takion, ChiakiRe
  * drop the oldest slots instead, packets that arrived among them.
  */
 static void takion_av_queue_make_room(ChiakiTakion *takion, ChiakiReorderQueue *queue, uint64_t seq_num,
-		int64_t *head_wait_start_us)
+		int64_t *head_wait_start_us, int64_t now)
 {
 	uint64_t size = chiaki_reorder_queue_size(queue);
 	while(queue->count > 0
 		&& !queue->seq_num_lt(seq_num, queue->seq_num_add(queue->begin, queue->count)) // past the end
 		&& !queue->seq_num_lt(seq_num, queue->seq_num_add(queue->begin, size))) // and doesn't fit
 	{
+		// The hole at the head has been waiting since then; any other hole only now
+		int64_t hole_start_us = *head_wait_start_us != 0 ? *head_wait_start_us : now;
 		if(!takion_av_queue_pull_all(takion, queue)
-			&& !takion_av_queue_skip_missing_head(takion, queue, "queue full"))
+			&& !takion_av_queue_skip_missing_head(takion, queue, "queue full", hole_start_us, now, true))
 			break;
 		*head_wait_start_us = 0;
 	}
@@ -1088,60 +1120,51 @@ static void takion_av_queue_make_room(ChiakiTakion *takion, ChiakiReorderQueue *
 
 /**
  * Pull and dispatch all in-order entries from the given AV queue.
- * If the head packet is missing, wait up to TAKION_AV_REORDER_TIMEOUT_US before
- * skipping it, then retry. This handles WiFi jitter without stalling on lost packets.
+ * If the head packet is missing, wait for it up to the reorder wait (reorderwait.h) before skipping to
+ * the first buffered packet, then retry. A hole is the run of missing packets at the head when it starts
+ * waiting: while its packets come, it keeps its start, and when all have come it is a lateness sample.
  */
 static void takion_av_queue_flush_with_timeout(ChiakiTakion *takion, ChiakiReorderQueue *queue,
-		int64_t *head_wait_start_us, uint64_t *head_wait_seq_num)
+		int64_t *head_wait_start_us, uint64_t *hole_end, int64_t now)
 {
-	int64_t now = chiaki_time_now_monotonic_us();
-	bool made_progress = true;
-
-	while(made_progress)
+	ChiakiReorderWait *wait = &takion->video_reorder_wait;
+	while(true)
 	{
-		made_progress = takion_av_queue_pull_all(takion, queue);
+		takion_av_queue_pull_all(takion, queue);
 
-		if(made_progress)
+		if(*head_wait_start_us != 0 && !queue->seq_num_lt(queue->begin, *hole_end))
+		{
+			// The whole hole came while waiting
+			chiaki_reorder_wait_filled(wait, now - *head_wait_start_us);
 			*head_wait_start_us = 0;
+		}
 
 		if(chiaki_reorder_queue_count(queue) == 0)
-			break;
-
-		if(*head_wait_start_us != 0 && queue->begin != *head_wait_seq_num)
 		{
-			if(queue->seq_num_gt(queue->begin, *head_wait_seq_num))
-			{
-				// The missing head advanced within the same loss burst. Keep the
-				// original timeout budget but track the new missing sequence.
-				*head_wait_seq_num = queue->begin;
-			}
-			else
-			{
-				// A genuinely new gap appeared; start a fresh timeout window.
-				*head_wait_start_us = now;
-				*head_wait_seq_num = queue->begin;
-				break;
-			}
+			*head_wait_start_us = 0;
+			break;
 		}
 
 		// Head slot is missing (packet lost or not yet arrived)
 		if(*head_wait_start_us == 0)
 		{
 			*head_wait_start_us = now;
-			*head_wait_seq_num = queue->begin;
+			*hole_end = queue->seq_num_add(queue->begin, takion_av_queue_missing_head(queue));
 			break;
 		}
 
-		if(now - *head_wait_start_us <= TAKION_AV_REORDER_TIMEOUT_US)
+		if(now - *head_wait_start_us <= chiaki_reorder_wait_us(wait))
 			break;
 
 		// Timeout exceeded: skip directly to the first buffered packet so startup
 		// and burst reordering only pay a single timeout.
-		if(!takion_av_queue_skip_missing_head(takion, queue, "reorder timeout"))
+		if(!takion_av_queue_skip_missing_head(takion, queue, "reorder timeout", *head_wait_start_us, now, false))
 			break;
 		*head_wait_start_us = 0;
-		made_progress = true;
 	}
+
+	chiaki_reorder_wait_expire(wait, now);
+	takion_av_reorder_wait_publish(takion, now);
 }
 
 static void takion_av_queues_flush_with_timeout(ChiakiTakion *takion)
@@ -1149,7 +1172,7 @@ static void takion_av_queues_flush_with_timeout(ChiakiTakion *takion)
 	if(takion->video_queue_initialized)
 	{
 		takion_av_queue_flush_with_timeout(takion, &takion->video_queue,
-			&takion->video_queue_head_wait_start_us, &takion->video_queue_head_wait_seq_num);
+			&takion->video_queue_head_wait_start_us, &takion->video_queue_hole_end, chiaki_time_now_monotonic_us());
 	}
 }
 
@@ -1167,7 +1190,7 @@ static uint64_t takion_av_queues_next_timeout_ms(ChiakiTakion *takion)
 		if(head_wait_start_us == 0)
 			continue;
 
-		int64_t remaining_us = TAKION_AV_REORDER_TIMEOUT_US - (now - head_wait_start_us);
+		int64_t remaining_us = chiaki_reorder_wait_us(&takion->video_reorder_wait) - (now - head_wait_start_us);
 		if(remaining_us <= 0)
 			return 0;
 
@@ -1186,7 +1209,9 @@ static void *takion_thread_func(void *user)
 
 	takion->video_queue_initialized = false;
 	takion->video_queue_head_wait_start_us = 0;
-	takion->video_queue_head_wait_seq_num = 0;
+	takion->video_queue_hole_end = 0;
+	chiaki_reorder_wait_init(&takion->video_reorder_wait);
+	chiaki_reorder_wait_stats_publish(&takion->video_reorder_wait, &takion->video_reorder_stats);
 
 	uint32_t seq_num_remote_initial;
 	if(takion_handshake(takion, &seq_num_remote_initial) != CHIAKI_ERR_SUCCESS)
@@ -1798,7 +1823,7 @@ static void takion_handle_packet_av(ChiakiTakion *takion, uint8_t base_type, uin
 	ChiakiReorderQueue *queue = &takion->video_queue;
 	bool *initialized = &takion->video_queue_initialized;
 	int64_t *head_wait = &takion->video_queue_head_wait_start_us;
-	uint64_t *head_wait_seq_num = &takion->video_queue_head_wait_seq_num;
+	uint64_t *hole_end = &takion->video_queue_hole_end;
 	size_t size_exp = TAKION_AV_VIDEO_REORDER_QUEUE_SIZE_EXP;
 
 	if(!*initialized)
@@ -1823,7 +1848,18 @@ static void takion_handle_packet_av(ChiakiTakion *takion, uint8_t base_type, uin
 		chiaki_reorder_queue_set_drop_cb(queue, takion_av_drop, takion);
 		*initialized = true;
 		*head_wait = 0;
-		*head_wait_seq_num = queue_begin;
+		*hole_end = queue_begin;
+	}
+
+	int64_t now = chiaki_time_now_monotonic_us();
+	if(queue->seq_num_lt(packet.packet_index, queue->begin)
+		&& chiaki_reorder_wait_late(&takion->video_reorder_wait, packet.packet_index, now))
+	{
+		// Too late: its hole was skipped. Duplicates and other old packets go to the queue, which drops them.
+		CHIAKI_LOGD(takion->log, "Takion AV packet %#x came after its hole was skipped", (unsigned int)packet.packet_index);
+		free(buf);
+		takion_av_reorder_wait_publish(takion, now);
+		return;
 	}
 
 	TakionAVPacketEntry *entry = malloc(sizeof(TakionAVPacketEntry));
@@ -1837,9 +1873,9 @@ static void takion_handle_packet_av(ChiakiTakion *takion, uint8_t base_type, uin
 	entry->buf_size = buf_size;
 	entry->packet = packet;
 
-	takion_av_queue_make_room(takion, queue, packet.packet_index, head_wait);
+	takion_av_queue_make_room(takion, queue, packet.packet_index, head_wait, now);
 	chiaki_reorder_queue_push(queue, packet.packet_index, entry);
-	takion_av_queue_flush_with_timeout(takion, queue, head_wait, head_wait_seq_num);
+	takion_av_queue_flush_with_timeout(takion, queue, head_wait, hole_end, now);
 }
 
 static ChiakiErrorCode av_packet_parse(bool v12, ChiakiTakionAVPacket *packet, ChiakiKeyState *key_state, uint8_t *buf, size_t buf_size)
