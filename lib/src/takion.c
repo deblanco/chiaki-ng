@@ -1104,6 +1104,11 @@ CHIAKI_EXPORT void chiaki_takion_video_reorder_stats(ChiakiTakion *takion, Chiak
 static void takion_av_queue_make_room(ChiakiTakion *takion, ChiakiReorderQueue *queue, uint64_t seq_num,
 		int64_t *head_wait_start_us, int64_t now)
 {
+	// Older than the queue's start (by more than half the sequence space past its end, it looks ahead of
+	// that end too): the queue drops it. Making room for it would deliver everything and rebase the queue
+	// on it, and then drop the packets that really come next as older.
+	if(queue->seq_num_lt(seq_num, queue->begin))
+		return;
 	uint64_t size = chiaki_reorder_queue_size(queue);
 	while(queue->count > 0
 		&& !queue->seq_num_lt(seq_num, queue->seq_num_add(queue->begin, queue->count)) // past the end

@@ -591,6 +591,65 @@ static MunitResult test_takion_av_duplicates_are_not_late(const MunitParameter p
 #endif
 }
 
+static MunitResult test_takion_av_stale_packet_keeps_queue(const MunitParameter params[], void *user)
+{
+#ifdef _WIN32
+	return MUNIT_SKIP;
+#else
+	TakionAVTest test;
+	takion_av_test_start(&test);
+
+	// 1 is missing and 2…100 wait behind it. A packet half the sequence space old looks past the queue's
+	// end too: it must be dropped, not make room (deliver all and rebase the queue on it, dropping what
+	// really comes next as older).
+	takion_av_test_send(&test, 0);
+	takion_av_test_wait_delivered(&test, 0);
+	takion_av_test_send_range(&test, 2, 100);
+	takion_av_test_send(&test, 1 + 32800);
+	takion_av_test_send(&test, 101);
+	takion_av_test_wait_delivered(&test, 101); // 1 is skipped after the reorder wait
+
+	const uint16_t missing[] = { 1 };
+	takion_av_test_assert_delivered(&test, 0, 101, missing, 1);
+	ChiakiReorderWaitStats stats;
+	chiaki_takion_video_reorder_stats(&test.takion, &stats);
+	munit_assert_uint32(stats.overflow_skips, ==, 0);
+	munit_assert_uint32(stats.late_packets, ==, 0);
+	takion_av_test_stop(&test);
+	return MUNIT_OK;
+#endif
+}
+
+static MunitResult test_takion_av_late_after_lost_window(const MunitParameter params[], void *user)
+{
+#ifdef _WIN32
+	return MUNIT_SKIP;
+#else
+	TakionAVTest test;
+	takion_av_test_start(&test);
+
+	// 1 is skipped, then no video for longer than CHIAKI_REORDER_WAIT_LOST_US (nothing flushes in between)
+	// before it comes: it was lost, not late
+	takion_av_test_send(&test, 0);
+	takion_av_test_send(&test, 2);
+	takion_av_test_wait_delivered(&test, 2);
+	chiaki_stop_pipe_sleep(&test.takion.stop_pipe, CHIAKI_REORDER_WAIT_LOST_US / 1000 + 20);
+	takion_av_test_send(&test, 1);
+	takion_av_test_send(&test, 3);
+	takion_av_test_wait_delivered(&test, 3);
+
+	const uint16_t missing[] = { 1 };
+	takion_av_test_assert_delivered(&test, 0, 3, missing, 1);
+	ChiakiReorderWaitStats stats;
+	chiaki_takion_video_reorder_stats(&test.takion, &stats);
+	munit_assert_uint32(stats.late_packets, ==, 0);
+	munit_assert_uint32(stats.holes_lost, ==, 1);
+	munit_assert_uint32(stats.wait_us, <, CHIAKI_REORDER_WAIT_INITIAL_US);
+	takion_av_test_stop(&test);
+	return MUNIT_OK;
+#endif
+}
+
 MunitTest tests_takion[] = {
 	{
 		"/av_packet_parse",
@@ -651,6 +710,22 @@ MunitTest tests_takion[] = {
 	{
 		"/av_duplicates_are_not_late",
 		test_takion_av_duplicates_are_not_late,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL
+	},
+	{
+		"/av_stale_packet_keeps_queue",
+		test_takion_av_stale_packet_keeps_queue,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL
+	},
+	{
+		"/av_late_after_lost_window",
+		test_takion_av_late_after_lost_window,
 		NULL,
 		NULL,
 		MUNIT_TEST_OPTION_NONE,

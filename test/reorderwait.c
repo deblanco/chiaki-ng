@@ -139,6 +139,29 @@ static MunitResult test_one_outlier_bumps_then_decays(const MunitParameter param
 	return MUNIT_OK;
 }
 
+static MunitResult test_loss_keeps_reordering_covered(const MunitParameter params[], void *user)
+{
+	Trace trace;
+	trace_init(&trace);
+	// A collapse: 25 holes of real loss for each packet 5 ms late (±1 ms), for a minute. The loss mustn't
+	// bring the wait under what the late packets showed, or each of them is skipped.
+	for(size_t i = 0; i < 60; i++)
+	{
+		trace_holes(&trace, 25, -1);
+		trace_hole(&trace, 4000 + (int64_t)(i % 3) * 1000);
+	}
+	munit_assert_uint32(trace.wait.stats.holes_lost, ==, 60 * 25);
+	munit_assert_uint32(trace.wait.stats.late_packets, <=, 1); // the first, before any sample
+	munit_assert_int64(chiaki_reorder_wait_us(&trace.wait), >=, 6000);
+
+	// Loss alone still trims what is above the samples' target, down to it
+	int64_t wait_us = chiaki_reorder_wait_us(&trace.wait);
+	trace.wait.wait_us = CHIAKI_REORDER_WAIT_MAX_US;
+	trace_holes(&trace, 100, -1);
+	munit_assert_int64(chiaki_reorder_wait_us(&trace.wait), ==, wait_us);
+	return MUNIT_OK;
+}
+
 static MunitResult test_clamps(const MunitParameter params[], void *user)
 {
 	Trace trace;
@@ -179,6 +202,42 @@ static MunitResult test_late_packets(const MunitParameter params[], void *user)
 	munit_assert_int64(chiaki_reorder_wait_us(&wait), ==, CHIAKI_REORDER_WAIT_MAX_US);
 	munit_assert_false(chiaki_reorder_wait_late(&wait, 1, 1200000)); // forgotten
 	munit_assert_uint32(wait.stats.late_packets, ==, 3);
+	return MUNIT_OK;
+}
+
+static MunitResult test_late_after_lost_window(const MunitParameter params[], void *user)
+{
+	ChiakiReorderWait wait;
+	chiaki_reorder_wait_init(&wait);
+	// Skipped at 1.016 s, then no video (so no expire) until its packet 100 ms later: it was lost
+	chiaki_reorder_wait_skipped(&wait, 10, 1, 1000000, 1016000, false);
+	munit_assert_false(chiaki_reorder_wait_late(&wait, 10, 1016000 + CHIAKI_REORDER_WAIT_LOST_US));
+	munit_assert_uint32(wait.stats.late_packets, ==, 0);
+	munit_assert_uint32(wait.stats.holes_lost, ==, 1);
+	munit_assert_int64(chiaki_reorder_wait_us(&wait), ==, 15200);
+	munit_assert_false(wait.sampled);
+	return MUNIT_OK;
+}
+
+static MunitResult test_lateness_sample_capped(const MunitParameter params[], void *user)
+{
+	ChiakiReorderWait wait;
+	chiaki_reorder_wait_init(&wait);
+	// 90 ms late: covered up to the ceiling, and a sample of no more than it
+	chiaki_reorder_wait_skipped(&wait, 10, 1, 1000000, 1016000, false);
+	munit_assert_true(chiaki_reorder_wait_late(&wait, 10, 1090000));
+	munit_assert_int64(chiaki_reorder_wait_us(&wait), ==, CHIAKI_REORDER_WAIT_MAX_US);
+	munit_assert_int64(wait.srtt_us, ==, CHIAKI_REORDER_WAIT_MAX_US);
+	munit_assert_int64(wait.rttvar_us, ==, CHIAKI_REORDER_WAIT_MAX_US / 2);
+
+	// So holes filling at once soon bring it down (17; with the raw 90 ms, 28)
+	size_t fills = 0;
+	while(chiaki_reorder_wait_us(&wait) == CHIAKI_REORDER_WAIT_MAX_US)
+	{
+		chiaki_reorder_wait_filled(&wait, 500);
+		fills++;
+	}
+	munit_assert_size(fills, <=, 20);
 	return MUNIT_OK;
 }
 
@@ -311,6 +370,14 @@ MunitTest tests_reorder_wait[] = {
 		NULL
 	},
 	{
+		"/loss_keeps_reordering_covered",
+		test_loss_keeps_reordering_covered,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL
+	},
+	{
 		"/clamps",
 		test_clamps,
 		NULL,
@@ -321,6 +388,22 @@ MunitTest tests_reorder_wait[] = {
 	{
 		"/late_packets",
 		test_late_packets,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL
+	},
+	{
+		"/late_after_lost_window",
+		test_late_after_lost_window,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL
+	},
+	{
+		"/lateness_sample_capped",
+		test_lateness_sample_capped,
 		NULL,
 		NULL,
 		MUNIT_TEST_OPTION_NONE,

@@ -22,10 +22,27 @@ static int64_t clamp_wait(int64_t us)
 	return us;
 }
 
-/** wait * 0.95, at least the minimum */
+/** What the samples so far call for: srtt + 4 rttvar, clamped */
+static int64_t target_wait(const ChiakiReorderWait *wait)
+{
+	return clamp_wait(wait->srtt_us + 4 * wait->rttvar_us);
+}
+
+/**
+ * A waited-for hole was lost: wait * 0.95, at least the minimum, and not below the samples' target. Loss
+ * says nothing about how late reordered packets come, so it only trims what is above that; else a burst
+ * of loss would bring the wait under the reordering seen just before, and skip its next late packet.
+ */
 static void shrink(ChiakiReorderWait *wait)
 {
-	wait->wait_us = clamp_wait(wait->wait_us - wait->wait_us / 20);
+	int64_t us = clamp_wait(wait->wait_us - wait->wait_us / 20);
+	if(wait->sampled)
+	{
+		int64_t target = target_wait(wait);
+		if(us < target)
+			us = target < wait->wait_us ? target : wait->wait_us;
+	}
+	wait->wait_us = us;
 }
 
 CHIAKI_EXPORT void chiaki_reorder_wait_init(ChiakiReorderWait *wait)
@@ -58,7 +75,7 @@ static void sample(ChiakiReorderWait *wait, int64_t lateness_us)
 		wait->srtt_us += (lateness_us - wait->srtt_us) / 8;
 	}
 
-	int64_t target = clamp_wait(wait->srtt_us + 4 * wait->rttvar_us);
+	int64_t target = target_wait(wait);
 	int64_t floor = wait->wait_us - wait->wait_us / 20;
 	if(target >= wait->wait_us)
 		wait->wait_us = target;
@@ -112,6 +129,9 @@ CHIAKI_EXPORT void chiaki_reorder_wait_skipped(ChiakiReorderWait *wait, ChiakiSe
 
 CHIAKI_EXPORT bool chiaki_reorder_wait_late(ChiakiReorderWait *wait, ChiakiSeqNum16 seq_num, int64_t now_us)
 {
+	// Holes skipped CHIAKI_REORDER_WAIT_LOST_US ago were lost, even if no flush ran since to say so (no
+	// video came in between): a packet of theirs now is too old to tell how late packets come.
+	chiaki_reorder_wait_expire(wait, now_us);
 	for(size_t i = 0; i < CHIAKI_REORDER_WAIT_SKIPS; i++)
 	{
 		ChiakiReorderWaitSkip *skip = &wait->skips[i];
@@ -127,7 +147,9 @@ CHIAKI_EXPORT bool chiaki_reorder_wait_late(ChiakiReorderWait *wait, ChiakiSeqNu
 
 		// The wait was too short for this one: cover it at once, and learn from it.
 		int64_t lateness_us = now_us - skip->hole_start_us;
-		sample(wait, lateness_us);
+		// Later than the longest wait can't be covered anyway: as a sample, it would only hold the wait
+		// at that ceiling for many samples after.
+		sample(wait, lateness_us < CHIAKI_REORDER_WAIT_MAX_US ? lateness_us : CHIAKI_REORDER_WAIT_MAX_US);
 		int64_t cover = clamp_wait(lateness_us + lateness_us / 4);
 		if(cover > wait->wait_us)
 			wait->wait_us = cover;

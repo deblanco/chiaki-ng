@@ -23,8 +23,10 @@ extern "C" {
  * - a packet arrives after its hole was skipped (chiaki_reorder_wait_late): the wait was too short, so it
  *   grows to at least 1.25 d at once.
  * Both feed a TCP RTO style smoother (RFC 6298: srtt, rttvar), and the wait follows srtt + 4 rttvar: up at
- * once, down by at most 5% per sample. A skipped hole that nothing arrives for within
- * CHIAKI_REORDER_WAIT_LOST_US was real loss, the wait for it was wasted: the wait shrinks by 5%.
+ * once, down by at most 5% per sample. A sample is at most CHIAKI_REORDER_WAIT_MAX_US: later can't be
+ * covered anyway. A skipped hole that nothing arrives for within CHIAKI_REORDER_WAIT_LOST_US was real
+ * loss, the wait for it was wasted: the wait shrinks by 5%, but not below srtt + 4 rttvar once there are
+ * samples (loss says nothing about how late reordered packets come).
  *
  * Skipping too early loses a frame (FEC has few units to spare), waiting too long only delays the frames
  * behind the hole: so late packets are covered generously and the wait shrinks slowly.
@@ -101,7 +103,8 @@ CHIAKI_EXPORT void chiaki_reorder_wait_skipped(ChiakiReorderWait *wait, ChiakiSe
 		int64_t hole_start_us, int64_t now_us, bool overflow);
 
 /**
- * A packet older than the reorder queue's start arrived at now_us.
+ * A packet older than the reorder queue's start arrived at now_us. Expires the skipped holes first
+ * (chiaki_reorder_wait_expire), so a packet of one skipped CHIAKI_REORDER_WAIT_LOST_US ago isn't late.
  * @return true if it belongs to a skipped hole and is the first of its number: a late packet. False for
  * anything else (a duplicate of a delivered or a late packet, or one of a hole forgotten already).
  */
