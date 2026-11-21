@@ -242,6 +242,53 @@ static void takion_test_write_header(uint8_t *buf, uint32_t tag, uint8_t chunk_t
 	buf[1 + 0xc] = chunk_type;
 	*((chiaki_unaligned_uint16_t *)(buf + 1 + 0xe)) = htons((uint16_t)(payload_size + 4));
 }
+
+/**
+ * Plays the console's side of the Takion handshake on peer, and returns the client's address.
+ */
+static void takion_test_handshake(int peer, struct sockaddr_in *client_addr, socklen_t *client_addr_len)
+{
+	uint8_t buf[0x100];
+	*client_addr_len = sizeof(*client_addr);
+	ssize_t r = recvfrom(peer, buf, sizeof(buf), 0, (struct sockaddr *)client_addr, client_addr_len);
+	munit_assert_int(r, ==, 1 + 0x10 + 0x10); // INIT
+	uint32_t tag_local = ntohl(*((chiaki_unaligned_uint32_t *)(buf + 1 + 0x10)));
+
+	uint8_t init_ack[1 + 0x10 + 0x10 + 0x20] = { 0 };
+	takion_test_write_header(init_ack, tag_local, 2, 0x10 + 0x20);
+	uint8_t *pl = init_ack + 1 + 0x10;
+	*((chiaki_unaligned_uint32_t *)(pl + 0)) = htonl(0x1337);
+	*((chiaki_unaligned_uint32_t *)(pl + 4)) = htonl(0x19000);
+	*((chiaki_unaligned_uint16_t *)(pl + 8)) = htons(0x64);
+	*((chiaki_unaligned_uint16_t *)(pl + 0xa)) = htons(0x64);
+	*((chiaki_unaligned_uint32_t *)(pl + 0xc)) = htonl(0x1337);
+	munit_assert_int(sendto(peer, init_ack, sizeof(init_ack), 0, (struct sockaddr *)client_addr, *client_addr_len), ==, sizeof(init_ack));
+
+	r = recvfrom(peer, buf, sizeof(buf), 0, NULL, NULL);
+	munit_assert_int(r, ==, 1 + 0x10 + 0x20); // COOKIE
+
+	uint8_t cookie_ack[1 + 0x10];
+	takion_test_write_header(cookie_ack, tag_local, 0xb, 0);
+	munit_assert_int(sendto(peer, cookie_ack, sizeof(cookie_ack), 0, (struct sockaddr *)client_addr, *client_addr_len), ==, sizeof(cookie_ack));
+}
+
+/**
+ * Binds a UDP socket on localhost for a fake console, with a 5 s receive timeout.
+ */
+static int takion_test_peer(struct sockaddr_in *peer_addr)
+{
+	int peer = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	munit_assert_int(peer, >=, 0);
+	struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+	setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	memset(peer_addr, 0, sizeof(*peer_addr));
+	peer_addr->sin_family = AF_INET;
+	peer_addr->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	munit_assert_int(bind(peer, (struct sockaddr *)peer_addr, sizeof(*peer_addr)), ==, 0);
+	socklen_t peer_addr_len = sizeof(*peer_addr);
+	munit_assert_int(getsockname(peer, (struct sockaddr *)peer_addr, &peer_addr_len), ==, 0);
+	return peer;
+}
 #endif
 
 static MunitResult test_takion_send_after_receive_error(const MunitParameter params[], void *user)
@@ -250,16 +297,8 @@ static MunitResult test_takion_send_after_receive_error(const MunitParameter par
 	return MUNIT_SKIP;
 #else
 	// Fake console: a UDP socket on localhost that completes the Takion handshake
-	int peer = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-	munit_assert_int(peer, >=, 0);
-	struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
-	setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-	struct sockaddr_in peer_addr = { 0 };
-	peer_addr.sin_family = AF_INET;
-	peer_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	munit_assert_int(bind(peer, (struct sockaddr *)&peer_addr, sizeof(peer_addr)), ==, 0);
-	socklen_t peer_addr_len = sizeof(peer_addr);
-	munit_assert_int(getsockname(peer, (struct sockaddr *)&peer_addr, &peer_addr_len), ==, 0);
+	struct sockaddr_in peer_addr;
+	int peer = takion_test_peer(&peer_addr);
 
 	TakionTeardownTest test = { 0 };
 	munit_assert_int(chiaki_mutex_init(&test.mutex, false), ==, CHIAKI_ERR_SUCCESS);
@@ -279,26 +318,7 @@ static MunitResult test_takion_send_after_receive_error(const MunitParameter par
 	uint8_t buf[0x100];
 	struct sockaddr_in client_addr;
 	socklen_t client_addr_len = sizeof(client_addr);
-	ssize_t r = recvfrom(peer, buf, sizeof(buf), 0, (struct sockaddr *)&client_addr, &client_addr_len);
-	munit_assert_int(r, ==, 1 + 0x10 + 0x10); // INIT
-	uint32_t tag_local = ntohl(*((chiaki_unaligned_uint32_t *)(buf + 1 + 0x10)));
-
-	uint8_t init_ack[1 + 0x10 + 0x10 + 0x20] = { 0 };
-	takion_test_write_header(init_ack, tag_local, 2, 0x10 + 0x20);
-	uint8_t *pl = init_ack + 1 + 0x10;
-	*((chiaki_unaligned_uint32_t *)(pl + 0)) = htonl(0x1337);
-	*((chiaki_unaligned_uint32_t *)(pl + 4)) = htonl(0x19000);
-	*((chiaki_unaligned_uint16_t *)(pl + 8)) = htons(0x64);
-	*((chiaki_unaligned_uint16_t *)(pl + 0xa)) = htons(0x64);
-	*((chiaki_unaligned_uint32_t *)(pl + 0xc)) = htonl(0x1337);
-	munit_assert_int(sendto(peer, init_ack, sizeof(init_ack), 0, (struct sockaddr *)&client_addr, client_addr_len), ==, sizeof(init_ack));
-
-	r = recvfrom(peer, buf, sizeof(buf), 0, NULL, NULL);
-	munit_assert_int(r, ==, 1 + 0x10 + 0x20); // COOKIE
-
-	uint8_t cookie_ack[1 + 0x10];
-	takion_test_write_header(cookie_ack, tag_local, 0xb, 0);
-	munit_assert_int(sendto(peer, cookie_ack, sizeof(cookie_ack), 0, (struct sockaddr *)&client_addr, client_addr_len), ==, sizeof(cookie_ack));
+	takion_test_handshake(peer, &client_addr, &client_addr_len);
 
 	chiaki_mutex_lock(&test.mutex);
 	munit_assert_int(chiaki_cond_timedwait_pred(&test.cond, &test.mutex, 5000, takion_teardown_test_connected, &test), ==, CHIAKI_ERR_SUCCESS);
@@ -322,6 +342,159 @@ static MunitResult test_takion_send_after_receive_error(const MunitParameter par
 	chiaki_mutex_fini(&test.mutex);
 
 	munit_assert_int(err, ==, CHIAKI_ERR_DISCONNECTED);
+	return MUNIT_OK;
+#endif
+}
+
+
+#ifndef _WIN32
+#define TAKION_AV_TEST_PACKETS_MAX 1024
+
+/**
+ * A Takion connected to a fake console on localhost that sends it video packets, recording the order the
+ * video packets come out of the reorder queue.
+ */
+typedef struct takion_av_test_t
+{
+	ChiakiTakion takion;
+	ChiakiMutex mutex;
+	ChiakiCond cond;
+	bool connected;
+	uint16_t delivered[TAKION_AV_TEST_PACKETS_MAX];
+	size_t delivered_count;
+	uint16_t wait_for;
+	int peer;
+	struct sockaddr_in client_addr;
+	socklen_t client_addr_len;
+} TakionAVTest;
+
+static void takion_av_test_cb(ChiakiTakionEvent *event, void *user)
+{
+	TakionAVTest *test = user;
+	chiaki_mutex_lock(&test->mutex);
+	if(event->type == CHIAKI_TAKION_EVENT_TYPE_CONNECTED)
+		test->connected = true;
+	else if(event->type == CHIAKI_TAKION_EVENT_TYPE_AV && event->av->is_video
+		&& test->delivered_count < TAKION_AV_TEST_PACKETS_MAX)
+		test->delivered[test->delivered_count++] = event->av->packet_index;
+	chiaki_cond_broadcast(&test->cond);
+	chiaki_mutex_unlock(&test->mutex);
+}
+
+static bool takion_av_test_connected(void *user)
+{
+	return ((TakionAVTest *)user)->connected;
+}
+
+static bool takion_av_test_delivered(void *user)
+{
+	TakionAVTest *test = user;
+	return test->delivered_count > 0 && test->delivered[test->delivered_count - 1] == test->wait_for;
+}
+
+static void takion_av_test_start(TakionAVTest *test)
+{
+	memset(test, 0, sizeof(*test));
+	struct sockaddr_in peer_addr;
+	test->peer = takion_test_peer(&peer_addr);
+	munit_assert_int(chiaki_mutex_init(&test->mutex, false), ==, CHIAKI_ERR_SUCCESS);
+	munit_assert_int(chiaki_cond_init(&test->cond), ==, CHIAKI_ERR_SUCCESS);
+
+	ChiakiTakionConnectInfo info = { 0 };
+	info.log = get_test_log();
+	info.sa = (struct sockaddr *)&peer_addr;
+	info.sa_len = sizeof(peer_addr);
+	info.cb = takion_av_test_cb;
+	info.cb_user = test;
+	info.enable_crypt = false;
+	info.protocol_version = 12;
+	info.close_socket = true;
+	munit_assert_int(chiaki_takion_connect(&test->takion, &info, NULL), ==, CHIAKI_ERR_SUCCESS);
+	takion_test_handshake(test->peer, &test->client_addr, &test->client_addr_len);
+
+	chiaki_mutex_lock(&test->mutex);
+	munit_assert_int(chiaki_cond_timedwait_pred(&test->cond, &test->mutex, 5000, takion_av_test_connected, test), ==, CHIAKI_ERR_SUCCESS);
+	chiaki_mutex_unlock(&test->mutex);
+}
+
+static void takion_av_test_stop(TakionAVTest *test)
+{
+	chiaki_takion_close(&test->takion);
+	CHIAKI_SOCKET_CLOSE(test->peer);
+	chiaki_cond_fini(&test->cond);
+	chiaki_mutex_fini(&test->mutex);
+}
+
+/**
+ * Sends the video packet with the given index (a frame of one unit, no payload to speak of).
+ */
+static void takion_av_test_send(TakionAVTest *test, uint16_t packet_index)
+{
+	uint8_t buf[1 + CHIAKI_TAKION_V12_AV_HEADER_SIZE_VIDEO + 8] = { 0 };
+	buf[0] = 2; // video
+	*((chiaki_unaligned_uint16_t *)(buf + 1)) = htons(packet_index);
+	munit_assert_int(sendto(test->peer, buf, sizeof(buf), 0, (struct sockaddr *)&test->client_addr, test->client_addr_len), ==, sizeof(buf));
+}
+
+static void takion_av_test_send_range(TakionAVTest *test, uint16_t first, uint16_t last)
+{
+	for(uint32_t i = first; i <= last; i++)
+		takion_av_test_send(test, (uint16_t)i);
+}
+
+/**
+ * Waits until packet_index is the last packet the queue delivered.
+ */
+static void takion_av_test_wait_delivered(TakionAVTest *test, uint16_t packet_index)
+{
+	chiaki_mutex_lock(&test->mutex);
+	test->wait_for = packet_index;
+	munit_assert_int(chiaki_cond_timedwait_pred(&test->cond, &test->mutex, 5000, takion_av_test_delivered, test), ==, CHIAKI_ERR_SUCCESS);
+	chiaki_mutex_unlock(&test->mutex);
+}
+
+/**
+ * Asserts the queue delivered exactly the packets first…last in order, except those in missing.
+ */
+static void takion_av_test_assert_delivered(TakionAVTest *test, uint16_t first, uint16_t last, const uint16_t *missing, size_t missing_count)
+{
+	chiaki_mutex_lock(&test->mutex);
+	size_t at = 0;
+	for(uint32_t i = first; i <= last; i++)
+	{
+		bool skipped = false;
+		for(size_t m = 0; m < missing_count; m++)
+			skipped = skipped || missing[m] == i;
+		if(skipped)
+			continue;
+		munit_assert_size(at, <, test->delivered_count);
+		munit_assert_uint16(test->delivered[at], ==, (uint16_t)i);
+		at++;
+	}
+	munit_assert_size(at, ==, test->delivered_count);
+	chiaki_mutex_unlock(&test->mutex);
+}
+#endif
+
+static MunitResult test_takion_av_queue_full_skips_holes(const MunitParameter params[], void *user)
+{
+#ifdef _WIN32
+	return MUNIT_SKIP;
+#else
+	TakionAVTest test;
+	takion_av_test_start(&test);
+
+	// 1 and 257 never come. When 258 arrives, the 256 slots from 1 are full: the queue used to make room
+	// by dropping its oldest slots, 1 (missing) and 2 (arrived). It skips 1 and delivers 2…256 instead.
+	takion_av_test_send(&test, 0);
+	takion_av_test_wait_delivered(&test, 0);
+	takion_av_test_send_range(&test, 2, 256);
+	takion_av_test_send_range(&test, 258, 300);
+	takion_av_test_wait_delivered(&test, 300); // 257 is skipped after the reorder wait
+
+	const uint16_t missing[] = { 1, 257 };
+	takion_av_test_assert_delivered(&test, 0, 300, missing, 2);
+	takion_av_test_stop(&test);
 	return MUNIT_OK;
 #endif
 }
@@ -354,6 +527,14 @@ MunitTest tests_takion[] = {
 	{
 		"/send_after_receive_error",
 		test_takion_send_after_receive_error,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL
+	},
+	{
+		"/av_queue_full_skips_holes",
+		test_takion_av_queue_full_skips_holes,
 		NULL,
 		NULL,
 		MUNIT_TEST_OPTION_NONE,

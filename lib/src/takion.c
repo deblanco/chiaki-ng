@@ -43,7 +43,7 @@
 #define TAKION_INBOUND_STREAMS 0x64
 
 #define TAKION_REORDER_QUEUE_SIZE_EXP 4 // => 16 entries
-#define TAKION_AV_VIDEO_REORDER_QUEUE_SIZE_EXP 6 // => 64 entries
+#define TAKION_AV_VIDEO_REORDER_QUEUE_SIZE_EXP 8 // => 256 entries: a 1080p frame can be more than 64 packets
 #define TAKION_AV_REORDER_TIMEOUT_US 16000 // ~1 frame at 60fps
 
 #define TAKION_POSTPONE_PACKETS_SIZE 32
@@ -1010,6 +1010,82 @@ static void takion_av_drop(uint64_t seq_num, void *elem_user, void *cb_user)
 	free(entry);
 }
 
+static void takion_av_deliver(ChiakiTakion *takion, TakionAVPacketEntry *entry)
+{
+	if(takion->cb)
+	{
+		ChiakiTakionEvent event = { 0 };
+		event.type = CHIAKI_TAKION_EVENT_TYPE_AV;
+		event.av = &entry->packet;
+		takion->cb(&event, takion->cb_user);
+	}
+	free(entry->buf);
+	free(entry);
+}
+
+/**
+ * Pull and dispatch all in-order entries from the given AV queue.
+ * @return whether anything was dispatched
+ */
+static bool takion_av_queue_pull_all(ChiakiTakion *takion, ChiakiReorderQueue *queue)
+{
+	bool pulled = false;
+	uint64_t seq_num;
+	TakionAVPacketEntry *entry;
+	while(chiaki_reorder_queue_pull(queue, &seq_num, (void **)&entry))
+	{
+		pulled = true;
+		takion_av_deliver(takion, entry);
+	}
+	return pulled;
+}
+
+/**
+ * Skip the missing packets at the head of the queue, up to the first buffered one.
+ * @return how many were skipped (0 if the head isn't missing or nothing is buffered)
+ */
+static uint64_t takion_av_queue_skip_missing_head(ChiakiTakion *takion, ChiakiReorderQueue *queue, const char *why)
+{
+	uint64_t skipped = 0;
+	while(skipped < queue->count)
+	{
+		uint64_t seq_num_peek;
+		void *entry_user;
+		if(chiaki_reorder_queue_peek(queue, skipped, &seq_num_peek, &entry_user))
+			break;
+		skipped++;
+	}
+	if(skipped == 0 || skipped >= queue->count)
+		return 0;
+
+	CHIAKI_LOGD(takion->log, "Takion AV %s: skipping %llu missing packet(s) before %#llx", why,
+		(unsigned long long)skipped,
+		(unsigned long long)queue->seq_num_add(queue->begin, skipped));
+	queue->begin = queue->seq_num_add(queue->begin, skipped);
+	queue->count -= skipped;
+	return skipped;
+}
+
+/**
+ * Make room for a packet ahead of the queue's end that wouldn't fit: deliver what is buffered, in order,
+ * skipping the missing packets in front of it, as the reorder timeout would. Left to the queue, it would
+ * drop the oldest slots instead, packets that arrived among them.
+ */
+static void takion_av_queue_make_room(ChiakiTakion *takion, ChiakiReorderQueue *queue, uint64_t seq_num,
+		int64_t *head_wait_start_us)
+{
+	uint64_t size = chiaki_reorder_queue_size(queue);
+	while(queue->count > 0
+		&& !queue->seq_num_lt(seq_num, queue->seq_num_add(queue->begin, queue->count)) // past the end
+		&& !queue->seq_num_lt(seq_num, queue->seq_num_add(queue->begin, size))) // and doesn't fit
+	{
+		if(!takion_av_queue_pull_all(takion, queue)
+			&& !takion_av_queue_skip_missing_head(takion, queue, "queue full"))
+			break;
+		*head_wait_start_us = 0;
+	}
+}
+
 /**
  * Pull and dispatch all in-order entries from the given AV queue.
  * If the head packet is missing, wait up to TAKION_AV_REORDER_TIMEOUT_US before
@@ -1023,23 +1099,7 @@ static void takion_av_queue_flush_with_timeout(ChiakiTakion *takion, ChiakiReord
 
 	while(made_progress)
 	{
-		made_progress = false;
-
-		uint64_t seq_num;
-		TakionAVPacketEntry *entry;
-		while(chiaki_reorder_queue_pull(queue, &seq_num, (void **)&entry))
-		{
-			made_progress = true;
-			if(takion->cb)
-			{
-				ChiakiTakionEvent event = { 0 };
-				event.type = CHIAKI_TAKION_EVENT_TYPE_AV;
-				event.av = &entry->packet;
-				takion->cb(&event, takion->cb_user);
-			}
-			free(entry->buf);
-			free(entry);
-		}
+		made_progress = takion_av_queue_pull_all(takion, queue);
 
 		if(made_progress)
 			*head_wait_start_us = 0;
@@ -1077,23 +1137,8 @@ static void takion_av_queue_flush_with_timeout(ChiakiTakion *takion, ChiakiReord
 
 		// Timeout exceeded: skip directly to the first buffered packet so startup
 		// and burst reordering only pay a single timeout.
-		uint64_t skipped = 0;
-		while(skipped < queue->count)
-		{
-			uint64_t seq_num_peek;
-			void *entry_user;
-			if(chiaki_reorder_queue_peek(queue, skipped, &seq_num_peek, &entry_user))
-				break;
-			skipped++;
-		}
-		if(skipped >= queue->count)
+		if(!takion_av_queue_skip_missing_head(takion, queue, "reorder timeout"))
 			break;
-
-		CHIAKI_LOGD(takion->log, "Takion AV reorder timeout: skipping %llu missing packet(s) before %#llx",
-			(unsigned long long)skipped,
-			(unsigned long long)queue->seq_num_add(queue->begin, skipped));
-		queue->begin = queue->seq_num_add(queue->begin, skipped);
-		queue->count -= skipped;
 		*head_wait_start_us = 0;
 		made_progress = true;
 	}
@@ -1792,6 +1837,7 @@ static void takion_handle_packet_av(ChiakiTakion *takion, uint8_t base_type, uin
 	entry->buf_size = buf_size;
 	entry->packet = packet;
 
+	takion_av_queue_make_room(takion, queue, packet.packet_index, head_wait);
 	chiaki_reorder_queue_push(queue, packet.packet_index, entry);
 	takion_av_queue_flush_with_timeout(takion, queue, head_wait, head_wait_seq_num);
 }
